@@ -1,8 +1,13 @@
 import argparse
+import inspect
+import json
+import os
+import re
+
 from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
-
+'''
 def run_decon(data_paths, channel_patterns, psf_full_paths, cpu_config_file):
 
     xyPixelSize = 0.108
@@ -112,31 +117,65 @@ def run_dsr(data_paths, channel_patterns, cpu_config_file):
                                   largeFile=largeFile, zarrFile=zarrFile, saveZarr=saveZarr, blockSize=blockSize,
                                   save16bit=save16bit, parseCluster=parseCluster, masterCompute=masterCompute,
                                   configFile=cpu_config_file, mccMode=mccMode)
-
+'''
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
+    ap.add_argument('--input-file', type=str, required=True,
+                    help="Paths to the folder containing tiff files separated by comma")
     ap.add_argument('--folder-paths', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Paths to the folder containing tiff files separated by comma")
     ap.add_argument('--channel-patterns', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Channel patterns separated by comma")
     ap.add_argument("--decon", action="store_true", help="Run decon")
     ap.add_argument("--dsr", action="store_true", help="Run dsr")
-    ap.add_argument('--psf-full-paths', type=lambda s: list(map(str, s.split(','))), required=True,
-                    help="PSF full paths separated by comma")
-    ap.add_argument('--cpu-config-file', type=str, default='',
-                    help="Path to the CPU config file")
     args = ap.parse_args()
+    input_file = args.input_file
     folder_paths = args.folder_paths
     channel_patterns = args.channel_patterns
     decon = args.decon
     dsr = args.dsr
-    psf_full_paths = args.psf_full_paths
-    cpu_config_file = args.cpu_config_file
+
+    with open(input_file) as f:
+        datasets_json = json.load(f)
+
+    datasets = {}
+    for folder_path in folder_paths:
+        datasets[folder_path] = datasets_json[folder_path]
+
+    with open(inspect.getfile(XR_decon_data_wrapper), "r", encoding="utf-8") as f:
+        decon_text = f.read()
+
+    with open(inspect.getfile(XR_deskew_rotate_data_wrapper), "r", encoding="utf-8") as f:
+        dsr_text = f.read()
+
+    matches = re.findall(r'"(.*?)": \[', decon_text)
+    valid_decon_params = {key: True for key in matches}
+
+    matches = re.findall(r'"(.*?)": \[', dsr_text)
+    valid_dsr_params = {key: True for key in matches}
+
+    run_decon = getattr(__import__('PyPetaKit5D'), 'XR_decon_data_wrapper')
+    run_dsr = getattr(__import__("PyPetaKit5D"), 'XR_deskew_rotate_data_wrapper')
 
     if decon:
-        run_decon(folder_paths, channel_patterns, psf_full_paths, cpu_config_file)
-        for i in range(len(folder_paths)):
-            folder_paths[i] += '/matlab_decon_omw/'
+        for folder_path, dataset in datasets.items():
+            kwargs = {}
+            for param, value in dataset.items():
+                if param in  valid_decon_params:
+                    kwargs[param] = value
+            kwargs['channelPatterns'] = channel_patterns
+            run_decon([folder_path], **kwargs)
     if dsr:
-        run_dsr(folder_paths, channel_patterns, cpu_config_file)
+        for folder_path, dataset in datasets.items():
+            kwargs = {}
+            for param, value in dataset.items():
+                if param in valid_dsr_params:
+                    kwargs[param] = value
+            kwargs['channelPatterns'] = channel_patterns
+            if decon:
+                if 'resultDirName' in dataset:
+                    folder_path = os.path.join(folder_path, dataset['resultDirName'])
+                else:
+                    folder_path = os.path.join(folder_path, 'matlab_decon')
+            run_decon([folder_path], **kwargs)

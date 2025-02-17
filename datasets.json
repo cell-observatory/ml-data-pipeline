@@ -1,0 +1,13 @@
+{
+    "/clusterfs/fiona/matthewmueller/Downloads/forMLPipeline/PetaKit5D_demo_cell_image_dataset": {
+        "decon": true,
+        "dsr": true,
+        "channelPatterns": [
+            "CamB",
+            "CamC"
+        ],
+        "psfFullpaths": [
+            "/clusterfs/fiona/matthewmueller/Downloads/forMLPipeline/PetaKit5D_demo_cell_image_dataset/PSF/488_2_c.tif"
+        ]
+    }
+}
