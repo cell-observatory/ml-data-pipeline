@@ -122,7 +122,7 @@ def run_dsr(data_paths, channel_patterns, cpu_config_file):
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--input-file', type=str, required=True,
-                    help="Paths to the folder containing tiff files separated by comma")
+                    help="Path to the json file containing dataset information")
     ap.add_argument('--folder-paths', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Paths to the folder containing tiff files separated by comma")
     ap.add_argument('--channel-patterns', type=lambda s: list(map(str, s.split(','))), required=True,

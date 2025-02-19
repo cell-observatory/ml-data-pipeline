@@ -9,6 +9,7 @@ import tensorstore as ts
 import cpptiff
 import zarr
 import json
+from importlib.metadata import version
 
 
 def extract_number(filename, pattern):
@@ -60,7 +61,8 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
 
 
 def write_zarr_chunks(args):
-    out_folder, out_name, data_shape, data, folder_path, filenames, bbox = args
+    out_folder, out_name, data_shape, data, dataset, folder_path, filenames, bbox, date = args
+    out_folder = str(os.path.join(out_folder, *date, os.path.basename(folder_path)))
     zarr_spec = {
         'driver': 'zarr',
         'kvstore': {
@@ -82,15 +84,14 @@ def write_zarr_chunks(args):
     zarr_file = ts.open(zarr_spec).result()
     zarr_file.write(data).result()
 
-    json_data = {
-        "folder_path": os.path.normpath(folder_path),
-        "filenames": filenames,
-        "bbox": bbox
-    }
-    # Serializing json
-    json_object = json.dumps(json_data, indent=4)
+    dataset['input_folder'] = folder_path
+    dataset['output_folder'] = out_folder
+    dataset['training_image_filenames'] = filenames
+    dataset['training_image_bbox'] = bbox
+    dataset['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
 
-    # Writing to sample.json
+    json_object = json.dumps(dataset, indent=4)
+
     with open(f'{os.path.normpath(os.path.join(out_folder, str(out_name)))}.json', 'w') as outfile:
         outfile.write(json_object)
 
@@ -128,7 +129,8 @@ def process_image(args):
     return index, chunks  # Return index and processed image
 
 
-def convert_tiff_to_zarr(folder_path, filenames, out_folder, out_name, batch_size, input_is_zarr, data_shape=None,
+def convert_tiff_to_zarr(dataset, folder_path, filenames, out_folder, out_name, batch_size, input_is_zarr, date,
+                         data_shape=None,
                          remove_background=False):
     if not data_shape:
         data_shape = [128, 128, 128, batch_size]
@@ -137,18 +139,17 @@ def convert_tiff_to_zarr(folder_path, filenames, out_folder, out_name, batch_siz
 
     data = np.zeros(tuple(data_shape) + (len(bboxes),), dtype=np.uint16, order='F')
 
-    # Prepare arguments for threading
     args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, remove_background) for i in
                  range(len(filenames))]
 
-    # Use threading for parallel execution
     with ProcessPoolExecutor() as executor:
         for i, chunks in executor.map(process_image, args_list):
             data[:, :, :, i, :] = chunks
 
-    args_list_chunks = [(out_folder, out_name + i, data_shape, data[:, :, :, :, i], folder_path, filenames, bboxes[i])
-                        for i in
-                        range(num_bboxes)]
+    args_list_chunks = [
+        (out_folder, out_name + i, data_shape, data[:, :, :, :, i], dataset, folder_path, filenames, bboxes[i], date)
+        for i in
+        range(num_bboxes)]
     with ProcessPoolExecutor() as executor:
         for result in executor.map(write_zarr_chunks, args_list_chunks):
             pass
@@ -157,6 +158,8 @@ def convert_tiff_to_zarr(folder_path, filenames, out_folder, out_name, batch_siz
 if __name__ == '__main__':
     # Parse arguments
     ap = argparse.ArgumentParser()
+    ap.add_argument('--input-file', type=str, required=True,
+                    help="Path to the json file containing dataset information")
     ap.add_argument('--folder-paths', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Paths to the folder containing tiff files separated by comma")
     ap.add_argument('--channel-patterns', type=lambda s: list(map(str, s.split(','))), required=True,
@@ -170,7 +173,10 @@ if __name__ == '__main__':
     ap.add_argument('--batch-size', type=int, required=True,
                     help="Number of timepoints in a training image")
     ap.add_argument("--input-is-zarr", action="store_true", help="Use Zarr instead of tiff for input")
+    ap.add_argument('--date', type=lambda s: list(map(str, s.split(','))), required=True,
+                    help="Comma separated date Year,Month,Day")
     args = ap.parse_args()
+    input_file = args.input_file
     folder_paths = args.folder_paths
     channel_patterns = args.channel_patterns
     output_folder = args.output_folder
@@ -178,15 +184,23 @@ if __name__ == '__main__':
     batch_start_number = args.batch_start_number
     batch_size = args.batch_size
     input_is_zarr = args.input_is_zarr
+    date = args.date
+
+    with open(input_file) as f:
+        datasets_json = json.load(f)
+
+    datasets = {}
+    for folder_path in folder_paths:
+        datasets[folder_path] = datasets_json[folder_path]
+
     for folder_path in folder_paths:
         for channel_pattern in channel_patterns:
             filenames = get_filenames(folder_path, channel_pattern, input_is_zarr)
             start = time.time()
 
-            #for i in range(0, len(filenames) - len(filenames) % batch_size, batch_size):
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
-            convert_tiff_to_zarr(folder_path, filenames_batch, output_folder,
-                                 output_name_start_number, batch_size, input_is_zarr)
+            convert_tiff_to_zarr(datasets[folder_path], folder_path, filenames_batch, output_folder,
+                                 output_name_start_number, batch_size, input_is_zarr, date)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")
