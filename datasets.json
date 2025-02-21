@@ -3,11 +3,25 @@
         "decon": true,
         "dsr": true,
         "channelPatterns": [
-            "CamB",
-            "CamC"
+            "CamB"
         ],
         "psfFullpaths": [
             "/clusterfs/fiona/matthewmueller/Downloads/forMLPipeline/PetaKit5D_demo_cell_image_dataset/PSF/488_2_c.tif"
-        ]
+        ],
+        "parseCluster": true,
+        "configFile": "/clusterfs/fiona/matthewmueller/ml-data-pipeline/cpu_config_file.json",
+        "cpusPerTask": 24,
+        "xyPixelSize": 0.108,
+        "dz": 0.3,
+        "dzPSF": 0.3,
+        "RLMethod": "omw",
+        "wienerAlpha": 0.005,
+        "OTFCumThresh": 0.88,
+        "skewed": true,
+        "resultDirName": "matlab_decon_omw",
+        "background": 100,
+        "deconIter": 2,
+        "edgeErosion": 8,
+        "save16bit": true
     }
 }

@@ -165,6 +165,7 @@ if __name__ == '__main__':
                 if param in  valid_decon_params:
                     kwargs[param] = value
             kwargs['channelPatterns'] = channel_patterns
+            kwargs['saveZarr'] = True
             run_decon([folder_path], **kwargs)
     if dsr:
         for folder_path, dataset in datasets.items():
@@ -174,8 +175,10 @@ if __name__ == '__main__':
                     kwargs[param] = value
             kwargs['channelPatterns'] = channel_patterns
             if decon:
+                kwargs['zarrFile'] = True
+                kwargs['saveZarr'] = True
                 if 'resultDirName' in dataset:
                     folder_path = os.path.join(folder_path, dataset['resultDirName'])
                 else:
                     folder_path = os.path.join(folder_path, 'matlab_decon')
-            run_decon([folder_path], **kwargs)
+            run_dsr([folder_path], **kwargs)

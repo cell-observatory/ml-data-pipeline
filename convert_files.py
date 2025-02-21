@@ -61,8 +61,8 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
 
 
 def write_zarr_chunks(args):
-    out_folder, out_name, data_shape, data, dataset, folder_path, filenames, bbox, date = args
-    out_folder = str(os.path.join(out_folder, *date, os.path.basename(folder_path)))
+    out_folder, out_name, data_shape, data, dataset, folder_path, channel_pattern, filenames, bbox, date, elapsed_sec = args
+    out_folder = str(os.path.join(out_folder, *date, os.path.basename(dataset['input_folder'])))
     zarr_spec = {
         'driver': 'zarr',
         'kvstore': {
@@ -84,11 +84,12 @@ def write_zarr_chunks(args):
     zarr_file = ts.open(zarr_spec).result()
     zarr_file.write(data).result()
 
-    dataset['input_folder'] = folder_path
     dataset['output_folder'] = out_folder
     dataset['training_image_filenames'] = filenames
     dataset['training_image_bbox'] = bbox
     dataset['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
+    dataset['elapsed_sec'] = elapsed_sec
+    dataset['channelPatterns'] = [channel_pattern]
 
     json_object = json.dumps(dataset, indent=4)
 
@@ -129,7 +130,7 @@ def process_image(args):
     return index, chunks  # Return index and processed image
 
 
-def convert_tiff_to_zarr(dataset, folder_path, filenames, out_folder, out_name, batch_size, input_is_zarr, date,
+def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size, input_is_zarr, date, elapsed_sec,
                          data_shape=None,
                          remove_background=False):
     if not data_shape:
@@ -147,7 +148,7 @@ def convert_tiff_to_zarr(dataset, folder_path, filenames, out_folder, out_name, 
             data[:, :, :, i, :] = chunks
 
     args_list_chunks = [
-        (out_folder, out_name + i, data_shape, data[:, :, :, :, i], dataset, folder_path, filenames, bboxes[i], date)
+        (out_folder, out_name + i, data_shape, data[:, :, :, :, i], dataset, folder_path, channel_pattern, filenames, bboxes[i], date, elapsed_sec)
         for i in
         range(num_bboxes)]
     with ProcessPoolExecutor() as executor:
@@ -162,6 +163,8 @@ if __name__ == '__main__':
                     help="Path to the json file containing dataset information")
     ap.add_argument('--folder-paths', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Paths to the folder containing tiff files separated by comma")
+    ap.add_argument('--orig-folder-paths', type=lambda s: list(map(str, s.split(','))), required=True,
+                    help="Paths to the original folder containing tiff files separated by comma")
     ap.add_argument('--channel-patterns', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Channel patterns separated by comma")
     ap.add_argument('--output-folder', type=str, required=True,
@@ -175,9 +178,12 @@ if __name__ == '__main__':
     ap.add_argument("--input-is-zarr", action="store_true", help="Use Zarr instead of tiff for input")
     ap.add_argument('--date', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Comma separated date Year,Month,Day")
+    ap.add_argument('--elapsed-sec', type=float, required=True,
+                    help="Preprocessing time in seconds")
     args = ap.parse_args()
     input_file = args.input_file
     folder_paths = args.folder_paths
+    orig_folder_paths = args.orig_folder_paths
     channel_patterns = args.channel_patterns
     output_folder = args.output_folder
     output_name_start_number = args.output_name_start_number
@@ -185,13 +191,15 @@ if __name__ == '__main__':
     batch_size = args.batch_size
     input_is_zarr = args.input_is_zarr
     date = args.date
+    elapsed_sec = args.elapsed_sec
 
     with open(input_file) as f:
         datasets_json = json.load(f)
 
     datasets = {}
-    for folder_path in folder_paths:
-        datasets[folder_path] = datasets_json[folder_path]
+    for i, folder_path in enumerate(folder_paths):
+        datasets[folder_path] = datasets_json[orig_folder_paths[i]]
+        datasets[folder_path]['input_folder'] = orig_folder_paths[i]
 
     for folder_path in folder_paths:
         for channel_pattern in channel_patterns:
@@ -199,8 +207,8 @@ if __name__ == '__main__':
             start = time.time()
 
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
-            convert_tiff_to_zarr(datasets[folder_path], folder_path, filenames_batch, output_folder,
-                                 output_name_start_number, batch_size, input_is_zarr, date)
+            convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
+                                 output_name_start_number, batch_size, input_is_zarr, date, elapsed_sec)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")

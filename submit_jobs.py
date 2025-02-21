@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import shutil
+
 from convert_files import get_chunk_bboxes
 import inspect
 import re
@@ -16,15 +17,17 @@ from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 
 def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, output_folder='', output_name_start_num=0, batch_start_number=0,
-                         batch_size=16, input_is_zarr=False, date_ymd=None, log_dir='', decon=False, dsr=False):
+                         batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None, log_dir='', decon=False, dsr=False):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
-        extra_params = f'''--input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} '''
+        extra_params = f'''--input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} '''
         if input_is_zarr:
             extra_params += '--input-is-zarr '
         if date_ymd:
-            extra_params += f'--date {",".join(map(str, date_ymd)) }'
+            extra_params += f'--date {",".join(map(str, date_ymd)) } '
+        if orig_folder_path:
+            extra_params += f'--orig-folder-paths {orig_folder_path} '
     elif python_script_name == 'decon_dsr.py':
         cpus_per_task = 24
         if input_file:
@@ -48,10 +51,10 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 
 
 def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder, output_name_start_num, batch_start_number, batch_size,
-                                         input_is_zarr, date_ymd, log_dir):
+                                         input_is_zarr, date_ymd, elapsed_sec, orig_folder_path, log_dir):
     return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, output_folder=output_folder,
                                 output_name_start_num=output_name_start_num, batch_start_number=batch_start_number, batch_size=batch_size,
-                                input_is_zarr=input_is_zarr, date_ymd=date_ymd, log_dir=log_dir)
+                                input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec, orig_folder_path=orig_folder_path, log_dir=log_dir)
 
 
 def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, log_dir):
@@ -96,9 +99,9 @@ if __name__ == '__main__':
     date_ymd = [datetime.now().year, datetime.now().month, datetime.now().day]
     run_decon_dsr = False
     batch_size = 8
-    decon_dsr_jobs = []
+    decon_dsr_jobs = {}
     decon_dsr_job_start_times = {}
-    decon_dsr_job_end_times = {}
+    decon_dsr_job_times = {}
 
     with open(input_file) as f:
         datasets = json.load(f)
@@ -129,30 +132,51 @@ if __name__ == '__main__':
                 datasets[folder_path]['input_is_zarr'] = True
                 script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dataset.get('decon'), dataset.get('dsr'),
                                                         log_dir)
-
+                key = f'Folder: {folder_path} Channel: {channel_pattern}'
                 decon_dsr_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                  stdout=subprocess.PIPE,
                                                  stderr=subprocess.PIPE)
                 decon_dsr_job.stdin.write(script)
-                decon_dsr_jobs.append(decon_dsr_job)
+                decon_dsr_job.stdin.close()
+
+                decon_dsr_job_start_times[key] = time.time()
+                decon_dsr_jobs[key] = decon_dsr_job
     if run_decon_dsr:
         print('Waiting for Decon/DSR jobs to finish')
-        for decon_dsr_job in decon_dsr_jobs:
-            stdout, stderr = decon_dsr_job.communicate()
-            print(f'Job {stdout.strip().split()[-1]} Finished!')
+        while decon_dsr_jobs:
+            for key, decon_dsr_job in decon_dsr_jobs.copy().items():
+                if decon_dsr_job.poll() is not None:
+                    decon_dsr_job_times[key] = time.time() - decon_dsr_job_start_times[key]
+                    print(f'Job for {key} Finished!')
+                    del decon_dsr_jobs[key]
+            time.sleep(1)
         print('All Decon/DSR jobs done!')
 
     training_image_jobs = []
     folders_to_delete = []
+    elapsed_sec = 0
     for folder_path, dataset in datasets.items():
+        orig_folder_path = folder_path
         if dataset.get('decon'):
-            folder_path += '/matlab_decon/'
+            if 'resultDirName' in dataset:
+                folder_path = os.path.join(folder_path, dataset['resultDirName'])
+            else:
+                folder_path = os.path.join(folder_path, 'matlab_decon')
+            #folder_path += '/matlab_decon/'
             folders_to_delete.append(folder_path)
         if dataset.get('dsr'):
-            folder_path += '/DSR/'
+            if 'DSRDirName' in dataset:
+                folder_path = os.path.join(folder_path, dataset['DSRDirName'])
+            else:
+                folder_path = os.path.join(folder_path, 'DSR')
+            #folder_path += '/DSR/'
             if not dataset.get('decon'):
                 folders_to_delete.append(folder_path)
         for channel_pattern in dataset['channelPatterns']:
+            if dataset.get('decon') or dataset.get('dsr'):
+                elapsed_sec = decon_dsr_job_times[f'Folder: {orig_folder_path} Channel: {channel_pattern}']
+            else:
+                elapsed_sec = 0
             batch_start_number = 0
             ext = 'tif'
             if dataset.get('input_is_zarr'):
@@ -164,12 +188,11 @@ if __name__ == '__main__':
             if not num_images_per_dataset:
                 raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
                                 f'Found {file_count} files and the batch size is {batch_size}.')
-            #get_filenames(folder_path, channel_pattern, dataset.input_is_zarr)
-            #num_training_images = 1
             for i in range(num_images_per_dataset):
                 script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder,
                                                               i * num_chunks_per_image, i * batch_size,
-                                                              batch_size, dataset.get('input_is_zarr'), date_ymd, log_dir)
+                                                              batch_size, dataset.get('input_is_zarr'), date_ymd,
+                                                              elapsed_sec, orig_folder_path, log_dir)
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,
                                                       stderr=subprocess.PIPE)
