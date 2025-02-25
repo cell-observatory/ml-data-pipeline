@@ -6,8 +6,8 @@ import json
 import os
 import sys
 import shutil
-
-from convert_files import get_chunk_bboxes
+from importlib.metadata import version
+from convert_files import get_chunk_bboxes, get_filenames
 import inspect
 import re
 from datetime import datetime
@@ -96,7 +96,7 @@ if __name__ == '__main__':
     output_folder = args.output_folder
     log_dir = args.log_dir
     cpu_config_file = args.cpu_config_file
-    date_ymd = [datetime.now().year, datetime.now().month, datetime.now().day]
+    date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
     batch_size = 8
     decon_dsr_jobs = {}
@@ -157,6 +157,7 @@ if __name__ == '__main__':
     elapsed_sec = 0
     for folder_path, dataset in datasets.items():
         orig_folder_path = folder_path
+        metadata = dataset
         if dataset.get('decon'):
             if 'resultDirName' in dataset:
                 folder_path = os.path.join(folder_path, dataset['resultDirName'])
@@ -184,10 +185,19 @@ if __name__ == '__main__':
             files = glob.glob(f'{folder_path}/*{channel_pattern}*.{ext}')
             file_count = len(files)
             num_images_per_dataset = math.floor(file_count / batch_size)
-            num_chunks_per_image = len(get_chunk_bboxes(folder_path, files[0], (128,128,128,batch_size), dataset.get('input_is_zarr')))
+            bboxes = get_chunk_bboxes(folder_path, files[0], (128,128,128,batch_size), dataset.get('input_is_zarr'))
+            num_chunks_per_image = len(bboxes)
+            input_is_zarr_filenames = dataset.get('input_is_zarr')
+            if dataset.get('decon') or dataset.get('dsr'):
+                input_is_zarr_filenames = False
+            filenames = get_filenames(orig_folder_path, channel_pattern, input_is_zarr_filenames)
             if not num_images_per_dataset:
                 raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
                                 f'Found {file_count} files and the batch size is {batch_size}.')
+            metadata['input_folder'] = orig_folder_path
+            metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, os.path.basename(dataset['input_folder'])))
+            metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
+            metadata['elapsed_sec'] = elapsed_sec
             for i in range(num_images_per_dataset):
                 script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder,
                                                               i * num_chunks_per_image, i * batch_size,
@@ -198,6 +208,15 @@ if __name__ == '__main__':
                                                       stderr=subprocess.PIPE)
                 training_image_job.stdin.write(script)
                 training_image_jobs.append(training_image_job)
+                for j in range(num_chunks_per_image):
+                    filename = f'{(i * num_chunks_per_image) + j}.zarr'
+                    metadata[filename] = {}
+                    metadata[filename]['channelPatterns'] = [channel_pattern]
+                    metadata[filename]['training_image_filenames'] = filenames[i*batch_size:(i*batch_size)+batch_size]
+                    metadata[filename]['training_image_bbox'] = bboxes[j]
+            metadata_object = json.dumps(metadata, indent=4)
+            with open(f'{os.path.normpath(os.path.join(metadata["output_folder"], "metadata"))}.json', 'w') as outfile:
+                outfile.write(metadata_object)
 
     print('Waiting for Training image creation jobs to finish')
     for training_image_job in training_image_jobs:

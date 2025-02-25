@@ -83,7 +83,7 @@ def write_zarr_chunks(args):
 
     zarr_file = ts.open(zarr_spec).result()
     zarr_file.write(data).result()
-
+    '''
     dataset['output_folder'] = out_folder
     dataset['training_image_filenames'] = filenames
     dataset['training_image_bbox'] = bbox
@@ -95,6 +95,7 @@ def write_zarr_chunks(args):
 
     with open(f'{os.path.normpath(os.path.join(out_folder, str(out_name)))}.json', 'w') as outfile:
         outfile.write(json_object)
+    '''
 
 
 def process_image(args):
