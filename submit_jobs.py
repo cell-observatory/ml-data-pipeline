@@ -1,4 +1,5 @@
 import argparse
+import copy
 import glob
 import subprocess
 import math
@@ -155,9 +156,10 @@ if __name__ == '__main__':
     training_image_jobs = []
     folders_to_delete = []
     elapsed_sec = 0
+    curr_training_image_num = 0
     for folder_path, dataset in datasets.items():
         orig_folder_path = folder_path
-        metadata = dataset
+        metadata = dataset.copy()
         if dataset.get('decon'):
             if 'resultDirName' in dataset:
                 folder_path = os.path.join(folder_path, dataset['resultDirName'])
@@ -195,12 +197,12 @@ if __name__ == '__main__':
                 raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
                                 f'Found {file_count} files and the batch size is {batch_size}.')
             metadata['input_folder'] = orig_folder_path
-            metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, os.path.basename(dataset['input_folder'])))
+            metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, os.path.basename(orig_folder_path)))
             metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
             metadata['elapsed_sec'] = elapsed_sec
             for i in range(num_images_per_dataset):
                 script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder,
-                                                              i * num_chunks_per_image, i * batch_size,
+                                                              (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
                                                               elapsed_sec, orig_folder_path, log_dir)
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
@@ -208,21 +210,50 @@ if __name__ == '__main__':
                                                       stderr=subprocess.PIPE)
                 training_image_job.stdin.write(script)
                 training_image_jobs.append(training_image_job)
+                metadata['training_images'] = {}
+                metadata_filenames = ','.join(filenames[i * batch_size:(i * batch_size) + batch_size])
+                metadata['training_images'][metadata_filenames] = {}
+                metadata['training_images'][metadata_filenames]['channelPatterns'] = [channel_pattern]
+                metadata['training_images'][metadata_filenames]['filenames'] = {}
                 for j in range(num_chunks_per_image):
-                    filename = f'{(i * num_chunks_per_image) + j}.zarr'
-                    metadata[filename] = {}
-                    metadata[filename]['channelPatterns'] = [channel_pattern]
-                    metadata[filename]['training_image_filenames'] = filenames[i*batch_size:(i*batch_size)+batch_size]
-                    metadata[filename]['training_image_bbox'] = bboxes[j]
-            metadata_object = json.dumps(metadata, indent=4)
-            with open(f'{os.path.normpath(os.path.join(metadata["output_folder"], "metadata"))}.json', 'w') as outfile:
-                outfile.write(metadata_object)
+                    filename = f'{((i * num_chunks_per_image) + j)}.zarr'
+                    metadata['training_images'][metadata_filenames]['filenames'][filename] = {}
+                    metadata['training_images'][metadata_filenames]['filenames'][filename]['bbox'] = bboxes[j]
+                curr_training_image_num += num_chunks_per_image
+                datasets[orig_folder_path]['num_chunks_per_image'] = num_chunks_per_image
+        datasets[orig_folder_path]['metadata'] = metadata
+        datasets[orig_folder_path]['num_training_images'] = curr_training_image_num
+
 
     print('Waiting for Training image creation jobs to finish')
     for training_image_job in training_image_jobs:
         stdout, stderr = training_image_job.communicate()
         print(f'Job {stdout.strip().split()[-1]} Finished!')
     print('All Training image creation jobs done!')
+    datasets_copy = copy.deepcopy(datasets)
+    for folder_path, dataset in datasets_copy.items():
+        files = glob.glob(f'{dataset["metadata"]["output_folder"]}/*.zarr')
+        files_sorted = sorted(files, key=lambda x: int(os.path.basename(x).split('.')[0]))
+        num_files = len(files_sorted)
+        if num_files < dataset['num_training_images']:
+            i = 0
+            j = 1
+            for filenames_str, training_image_info in dataset['metadata']['training_images'].items():
+                datasets[folder_path]['metadata']['training_images'][filenames_str]['filenames'] = {}
+                for filename, zarr_info in training_image_info['filenames'].items():
+                    if i >= num_files:
+                        break
+                    #curr_num = int(filename.split('.')[0])
+                    curr_file_num = int(os.path.basename(files_sorted[i]).split('.')[0])
+                    if curr_file_num > dataset['num_chunks_per_image']*(j):
+                        j += 1
+                        break
+                    datasets[folder_path]['metadata']['training_images'][filenames_str]['filenames'][f'{i}.zarr'] = training_image_info['filenames'][f'{curr_file_num}.zarr']
+                    os.rename(files_sorted[i], os.path.join(dataset['metadata']['output_folder'], f'{i}.zarr'))
+                    i += 1
+        metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
+        with open(f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json', 'w') as outfile:
+            outfile.write(metadata_object)
     if folders_to_delete:
         print('Cleaning up intermediate results')
         for folder_to_delete in folders_to_delete:

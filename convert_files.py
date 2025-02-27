@@ -4,12 +4,13 @@ import glob
 import time
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Manager
 import numpy as np
 import tensorstore as ts
 import cpptiff
 import zarr
 import json
-from importlib.metadata import version
+#from importlib.metadata import version
 
 
 def extract_number(filename, pattern):
@@ -53,7 +54,7 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
         while y + data_shape[1] < im_shape[1]:
             x = im_shape[2] % data_shape[2] // 2
             while x + data_shape[2] < im_shape[2]:
-                bboxes.append([z, z + data_shape[0], y, y + data_shape[1], x, x + data_shape[2]])
+                bboxes.append([z, y, x, z + data_shape[0], y + data_shape[1], x + data_shape[2]])
                 x += data_shape[2]
             y += data_shape[1]
         z += data_shape[0]
@@ -100,9 +101,10 @@ def write_zarr_chunks(args):
 
 def process_image(args):
     """Function to read and process an image."""
-    index, filename, folder_path, input_is_zarr, data_shape, bboxes, remove_background = args
+    index, filename, folder_path, input_is_zarr, data_shape, bboxes, remove_background, bad_chunks = args
     if not input_is_zarr:
-        im = cpptiff.read_tiff(os.path.join(folder_path, filename), [0, bboxes[-1][1]])
+        #im = cpptiff.read_tiff(os.path.join(folder_path, filename), [0, bboxes[-1][1]])
+        im = cpptiff.read_tiff(os.path.join(folder_path, filename))
     else:
         im_ts = ts.open({
             'driver': 'zarr',
@@ -113,7 +115,8 @@ def process_image(args):
         }).result()
 
         # Data is YXZ for zarr so transpose it after
-        im = im_ts[:bboxes[-1][3], :bboxes[-1][5], :bboxes[-1][1]].read().result()
+        #im = im_ts[:bboxes[-1][3], :bboxes[-1][5], :bboxes[-1][1]].read().result()
+        im = im_ts.read().result()
         im = np.transpose(im, (2, 0, 1))
 
     # Remove background if needed
@@ -121,9 +124,19 @@ def process_image(args):
         nstddevs = 2
         im = np.clip(im - 100 - (np.std(im) * nstddevs), 0, np.iinfo(np.uint16).max).astype(np.uint16)
     chunks = np.zeros(tuple(data_shape[:3]) + (len(bboxes),), dtype=np.uint16, order='F')
-
+    min_val = np.percentile(im, 0.1)
+    max_val = np.percentile(im, 99.9)
     for i, bbox in enumerate(bboxes):
-        chunks[:, :, :, i] = im[bbox[0]:bbox[1], bbox[2]:bbox[3], bbox[4]:bbox[5]]
+        if i in bad_chunks:
+            continue
+        chunk = im[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]]
+        within_bounds = (chunk > min_val) & (chunk < max_val)
+        percentage_within = np.mean(within_bounds)
+        if percentage_within >= .8:
+            chunks[:, :, :, i] = chunk
+        else:
+            bad_chunks[i] = True
+
     '''
     elif im.itemsize > 2:
         im = np.clip(im, 0, np.iinfo(np.uint16).max).astype(np.uint16)
@@ -131,7 +144,8 @@ def process_image(args):
     return index, chunks  # Return index and processed image
 
 
-def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size, input_is_zarr, date, elapsed_sec,
+def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
+                         input_is_zarr, date, elapsed_sec,
                          data_shape=None,
                          remove_background=False):
     if not data_shape:
@@ -141,17 +155,23 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
 
     data = np.zeros(tuple(data_shape) + (len(bboxes),), dtype=np.uint16, order='F')
 
-    args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, remove_background) for i in
-                 range(len(filenames))]
 
-    with ProcessPoolExecutor() as executor:
-        for i, chunks in executor.map(process_image, args_list):
-            data[:, :, :, i, :] = chunks
+
+    with Manager() as manager:
+        bad_chunks = manager.dict()
+        args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, remove_background, bad_chunks) for i in
+                     range(len(filenames))]
+        with ProcessPoolExecutor() as executor:
+            for i, chunks in executor.map(process_image, args_list):
+                data[:, :, :, i, :] = chunks
+                #bad_chunks = {**bad_chunks, **bad_chunks_i}
+        bad_chunks = dict(bad_chunks)
 
     args_list_chunks = [
-        (out_folder, out_name + i, data_shape, data[:, :, :, :, i], dataset, folder_path, channel_pattern, filenames, bboxes[i], date, elapsed_sec)
+        (out_folder, out_name + i, data_shape, data[:, :, :, :, i], dataset, folder_path, channel_pattern, filenames,
+         bboxes[i], date, elapsed_sec)
         for i in
-        range(num_bboxes)]
+        range(num_bboxes) if not bad_chunks.get(i, False)]
     with ProcessPoolExecutor() as executor:
         for result in executor.map(write_zarr_chunks, args_list_chunks):
             pass
