@@ -48,21 +48,23 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
         im_shape = (im_zarr.shape[2], im_zarr.shape[0], im_zarr.shape[1])
 
     bboxes = []
-    z = im_shape[0] % data_shape[0] // 2
-    while z + data_shape[0] < im_shape[0]:
-        y = im_shape[1] % data_shape[1] // 2
-        while y + data_shape[1] < im_shape[1]:
-            x = im_shape[2] % data_shape[2] // 2
-            while x + data_shape[2] < im_shape[2]:
-                bboxes.append([z, y, x, z + data_shape[0], y + data_shape[1], x + data_shape[2]])
-                x += data_shape[2]
-            y += data_shape[1]
-        z += data_shape[0]
+    z = im_shape[0] % data_shape[1] // 2
+    while z + data_shape[1] < im_shape[0]:
+        y = im_shape[1] % data_shape[2] // 2
+        while y + data_shape[2] < im_shape[1]:
+            x = im_shape[2] % data_shape[3] // 2
+            while x + data_shape[3] < im_shape[2]:
+                bboxes.append([z, y, x, z + data_shape[1], y + data_shape[2], x + data_shape[3]])
+                x += data_shape[3]
+            y += data_shape[2]
+        z += data_shape[1]
     return bboxes
 
 
 def write_zarr_chunks(args):
     out_folder, out_name, data_shape, data, dataset, folder_path, channel_pattern, filenames, bbox, date, elapsed_sec = args
+    data = data[..., np.newaxis]
+    data_shape.append(1)
     out_folder = str(os.path.join(out_folder, *date, os.path.basename(dataset['input_folder'])))
     zarr_spec = {
         'driver': 'zarr',
@@ -123,7 +125,7 @@ def process_image(args):
     if remove_background:
         nstddevs = 2
         im = np.clip(im - 100 - (np.std(im) * nstddevs), 0, np.iinfo(np.uint16).max).astype(np.uint16)
-    chunks = np.zeros(tuple(data_shape[:3]) + (len(bboxes),), dtype=np.uint16, order='F')
+    chunks = np.zeros(tuple(data_shape[-3:]) + (len(bboxes),), dtype=np.uint16, order='F')
     min_val = np.percentile(im, 0.1)
     max_val = np.percentile(im, 99.9)
     for i, bbox in enumerate(bboxes):
@@ -149,7 +151,7 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
                          data_shape=None,
                          remove_background=False):
     if not data_shape:
-        data_shape = [128, 128, 128, batch_size]
+        data_shape = [batch_size, 128, 128, 128]
     bboxes = get_chunk_bboxes(folder_path, filenames[0], data_shape, input_is_zarr)
     num_bboxes = len(bboxes)
 
@@ -163,7 +165,7 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
                      range(len(filenames))]
         with ProcessPoolExecutor() as executor:
             for i, chunks in executor.map(process_image, args_list):
-                data[:, :, :, i, :] = chunks
+                data[i, :, :, :, :] = chunks
                 #bad_chunks = {**bad_chunks, **bad_chunks_i}
         bad_chunks = dict(bad_chunks)
 

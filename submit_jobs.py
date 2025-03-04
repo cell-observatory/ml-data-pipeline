@@ -17,8 +17,25 @@ from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 
-def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, output_folder='', output_name_start_num=0, batch_start_number=0,
-                         batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None, log_dir='', decon=False, dsr=False):
+def create_sbatch_matlab_script(fn, fn_psf, timepoint_i, log_dir=''):
+    cpus_per_task = 1
+    return f'''#!/bin/sh
+#SBATCH --qos=abc_high
+#SBATCH --partition=abc
+#SBATCH --account=co_abc
+#SBATCH --nodes=1
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --mem-per-cpu=21000
+#SBATCH --output={log_dir}/%j.out
+cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch \
+"python_FFT2OTF_support_ratio({fn},{fn_psf},{timepoint_i},{sys.executable})"
+'''
+
+
+def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, output_folder='',
+                         output_name_start_num=0, batch_start_number=0,
+                         batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
+                         log_dir='', decon=False, dsr=False):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
@@ -26,7 +43,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
         if input_is_zarr:
             extra_params += '--input-is-zarr '
         if date_ymd:
-            extra_params += f'--date {",".join(map(str, date_ymd)) } '
+            extra_params += f'--date {",".join(map(str, date_ymd))} '
         if orig_folder_path:
             extra_params += f'--orig-folder-paths {orig_folder_path} '
     elif python_script_name == 'decon_dsr.py':
@@ -51,11 +68,15 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 '''
 
 
-def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder, output_name_start_num, batch_start_number, batch_size,
+def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder, output_name_start_num,
+                                         batch_start_number, batch_size,
                                          input_is_zarr, date_ymd, elapsed_sec, orig_folder_path, log_dir):
-    return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, output_folder=output_folder,
-                                output_name_start_num=output_name_start_num, batch_start_number=batch_start_number, batch_size=batch_size,
-                                input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec, orig_folder_path=orig_folder_path, log_dir=log_dir)
+    return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern,
+                                output_folder=output_folder,
+                                output_name_start_num=output_name_start_num, batch_start_number=batch_start_number,
+                                batch_size=batch_size,
+                                input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec,
+                                orig_folder_path=orig_folder_path, log_dir=log_dir)
 
 
 def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, log_dir):
@@ -81,7 +102,6 @@ class Dataset:
         self.input_is_zarr = False
 
 
-
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument('--input-file', type=str, required=True,
@@ -92,14 +112,16 @@ if __name__ == '__main__':
                     help="Path to the folder to output the job logs to")
     ap.add_argument('--cpu-config-file', type=str, default='',
                     help="Path to the CPU config file")
+    ap.add_argument('--num-timepoints-per-image', type=int, default=16,
+                    help="Number of timepoints in a training image")
     args = ap.parse_args()
     input_file = args.input_file
     output_folder = args.output_folder
     log_dir = args.log_dir
     cpu_config_file = args.cpu_config_file
+    batch_size = args.num_timepoints_per_image
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
-    batch_size = 8
     decon_dsr_jobs = {}
     decon_dsr_job_start_times = {}
     decon_dsr_job_times = {}
@@ -129,9 +151,10 @@ if __name__ == '__main__':
                 num_images_per_dataset = math.floor(file_count / batch_size)
                 if not num_images_per_dataset:
                     raise SystemExit(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
-                                    f'Found {file_count} files and the batch size is {batch_size}.')
+                                     f'Found {file_count} files and the batch size is {batch_size}.')
                 datasets[folder_path]['input_is_zarr'] = True
-                script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dataset.get('decon'), dataset.get('dsr'),
+                script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dataset.get('decon'),
+                                                        dataset.get('dsr'),
                                                         log_dir)
                 key = f'Folder: {folder_path} Channel: {channel_pattern}'
                 decon_dsr_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
@@ -187,7 +210,7 @@ if __name__ == '__main__':
             files = glob.glob(f'{folder_path}/*{channel_pattern}*.{ext}')
             file_count = len(files)
             num_images_per_dataset = math.floor(file_count / batch_size)
-            bboxes = get_chunk_bboxes(folder_path, files[0], (128,128,128,batch_size), dataset.get('input_is_zarr'))
+            bboxes = get_chunk_bboxes(folder_path, files[0], (batch_size, 128, 128, 128), dataset.get('input_is_zarr'))
             num_chunks_per_image = len(bboxes)
             input_is_zarr_filenames = dataset.get('input_is_zarr')
             if dataset.get('decon') or dataset.get('dsr'):
@@ -224,7 +247,6 @@ if __name__ == '__main__':
         datasets[orig_folder_path]['metadata'] = metadata
         datasets[orig_folder_path]['num_training_images'] = curr_training_image_num
 
-
     print('Waiting for Training image creation jobs to finish')
     for training_image_job in training_image_jobs:
         stdout, stderr = training_image_job.communicate()
@@ -245,14 +267,17 @@ if __name__ == '__main__':
                         break
                     #curr_num = int(filename.split('.')[0])
                     curr_file_num = int(os.path.basename(files_sorted[i]).split('.')[0])
-                    if curr_file_num > dataset['num_chunks_per_image']*(j):
+                    if curr_file_num > dataset['num_chunks_per_image'] * (j):
                         j += 1
                         break
-                    datasets[folder_path]['metadata']['training_images'][filenames_str]['filenames'][f'{i}.zarr'] = training_image_info['filenames'][f'{curr_file_num}.zarr']
+                    datasets[folder_path]['metadata']['training_images'][filenames_str]['filenames'][f'{i}.zarr'] = \
+                    training_image_info['filenames'][f'{curr_file_num}.zarr']
                     os.rename(files_sorted[i], os.path.join(dataset['metadata']['output_folder'], f'{i}.zarr'))
                     i += 1
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
-        with open(f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json', 'w') as outfile:
+        with open(
+                f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
+                'w') as outfile:
             outfile.write(metadata_object)
     if folders_to_delete:
         print('Cleaning up intermediate results')

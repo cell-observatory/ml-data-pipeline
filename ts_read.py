@@ -12,7 +12,7 @@ def ts_read_matlab(file_path, i):
         }
     }).result()
 
-    array_data = im_ts[:, :, :, i].read().result()
+    array_data = im_ts[i, :, :, :, 0].read().result()
     # permute to yxz for Matlab
     array_data = np.transpose(array_data, (1, 2, 0))
     return np.ascontiguousarray(array_data)
