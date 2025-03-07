@@ -191,6 +191,7 @@ if __name__ == '__main__':
     folders_to_delete = []
     elapsed_sec = 0
     curr_training_image_num = 0
+    zarr_channel_patterns = {}
     for folder_path, dataset in datasets.items():
         ext = 'tif'
         if dataset.get('input_is_zarr'):
@@ -266,9 +267,15 @@ if __name__ == '__main__':
             if not orig_channel_pattern in orig_channel_patterns:
                 orig_channel_patterns[orig_channel_pattern] = True
                 curr_channel += 1
-                zarr_out_folder = str(os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
-                zarr_channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
                 curr_data_shape[0] = num_images_per_dataset*num_chunks_per_image
+
+            zarr_channel_pattern = f'{channel_pattern}.zarr'
+            if tiled:
+                zarr_channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
+            if not zarr_channel_pattern in zarr_channel_patterns:
+                zarr_channel_patterns[zarr_channel_pattern] = True
+                zarr_out_folder = str(
+                    os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
                 zarr_spec = {
                     'driver': 'zarr',
                     'kvstore': {
@@ -287,6 +294,7 @@ if __name__ == '__main__':
                     "delete_existing": True
                 }
                 ts.open(zarr_spec).result()
+
             batch_start_number = 0
             input_is_zarr_filenames = dataset.get('input_is_zarr')
             if dataset.get('decon') or dataset.get('dsr'):
@@ -307,21 +315,19 @@ if __name__ == '__main__':
                 training_image_jobs[key] = training_image_job
 
                 #metadata_filenames = ','.join(filenames[i * batch_size:(i * batch_size) + batch_size])
-                if tiled:
-                    channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
                 metadata_filenames = filenames[i * batch_size:(i * batch_size) + batch_size]
-                if not metadata['training_images'].get(channel_pattern):
-                    metadata['training_images'][channel_pattern] = {}
-                if not metadata['training_images'][channel_pattern].get('channelPatterns'):
-                    metadata['training_images'][channel_pattern]['channelPatterns'] = []
-                metadata['training_images'][channel_pattern]['channelPatterns'].append(orig_channel_pattern)
-                metadata['training_images'][channel_pattern]['filenames'] = metadata_filenames
-                if not metadata['training_images'][channel_pattern].get('chunk_names'):
-                    metadata['training_images'][channel_pattern]['chunk_names'] = {}
+                if not metadata['training_images'].get(zarr_channel_pattern):
+                    metadata['training_images'][zarr_channel_pattern] = {}
+                if not metadata['training_images'][zarr_channel_pattern].get('channelPatterns'):
+                    metadata['training_images'][zarr_channel_pattern]['channelPatterns'] = []
+                metadata['training_images'][zarr_channel_pattern]['channelPatterns'].append(orig_channel_pattern)
+                metadata['training_images'][zarr_channel_pattern]['filenames'] = metadata_filenames
+                if not metadata['training_images'][zarr_channel_pattern].get('chunk_names'):
+                    metadata['training_images'][zarr_channel_pattern]['chunk_names'] = {}
                 for j in range(num_chunks_per_image):
                     filename = f'{((i * num_chunks_per_image) + j)}.0.0.0.0.{curr_channel}'
-                    metadata['training_images'][channel_pattern]['chunk_names'][filename] = {}
-                    metadata['training_images'][channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
+                    metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
+                    metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
                 curr_training_image_num += num_chunks_per_image
                 datasets[orig_folder_path]['num_chunks_per_image'] = num_chunks_per_image
         datasets[orig_folder_path]['metadata'] = metadata
@@ -334,14 +340,8 @@ if __name__ == '__main__':
                 print(f'Job for {key} Finished!')
                 del training_image_jobs[key]
         time.sleep(1)
-    '''
-    for training_image_job in training_image_jobs:
-        stdout, stderr = training_image_job.communicate()
-        print(f'Job {stdout.strip().split()[-1]} Finished!')
-    '''
     print('All Training image creation jobs done!')
 
-    #datasets_copy = copy.deepcopy(datasets)
     for folder_path, dataset in datasets.items():
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
         with open(
