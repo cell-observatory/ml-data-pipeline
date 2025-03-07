@@ -8,6 +8,10 @@ import os
 import sys
 import shutil
 from importlib.metadata import version
+from pathlib import Path
+
+import tensorstore as ts
+
 from convert_files import get_chunk_bboxes, get_filenames
 import inspect
 import re
@@ -32,14 +36,16 @@ cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch \
 '''
 
 
-def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, output_folder='',
+def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, tiled=True, channel_num=0, output_folder='',
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
                          log_dir='', decon=False, dsr=False):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
-        extra_params = f'''--input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} '''
+        extra_params = f'''--channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} '''
+        if tiled:
+            extra_params += '--tiled '
         if input_is_zarr:
             extra_params += '--input-is-zarr '
         if date_ymd:
@@ -68,11 +74,11 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 '''
 
 
-def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder, output_name_start_num,
+def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, channel_num, output_folder, output_name_start_num,
                                          batch_start_number, batch_size,
                                          input_is_zarr, date_ymd, elapsed_sec, orig_folder_path, log_dir):
-    return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern,
-                                output_folder=output_folder,
+    return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, tiled=tiled,
+                                channel_num=channel_num, output_folder=output_folder,
                                 output_name_start_num=output_name_start_num, batch_start_number=batch_start_number,
                                 batch_size=batch_size,
                                 input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec,
@@ -112,6 +118,8 @@ if __name__ == '__main__':
                     help="Path to the folder to output the job logs to")
     ap.add_argument('--cpu-config-file', type=str, default='',
                     help="Path to the CPU config file")
+    ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[128, 128, 128],
+                    help="Comma separated date Year,Month,Day")
     ap.add_argument('--num-timepoints-per-image', type=int, default=16,
                     help="Number of timepoints in a training image")
     args = ap.parse_args()
@@ -119,7 +127,9 @@ if __name__ == '__main__':
     output_folder = args.output_folder
     log_dir = args.log_dir
     cpu_config_file = args.cpu_config_file
+    data_shape = args.data_shape
     batch_size = args.num_timepoints_per_image
+    data_shape.insert(0, batch_size)
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
     decon_dsr_jobs = {}
@@ -146,6 +156,7 @@ if __name__ == '__main__':
                     continue
                 if param not in valid_params:
                     raise SystemExit(f'{param} is not a valid parameter for PetaKit5D!')
+
             for i, channel_pattern in enumerate(dataset['channelPatterns']):
                 file_count = len(glob.glob(f'{folder_path}/*{channel_pattern}*.tif'))
                 num_images_per_dataset = math.floor(file_count / batch_size)
@@ -176,104 +187,162 @@ if __name__ == '__main__':
             time.sleep(1)
         print('All Decon/DSR jobs done!')
 
-    training_image_jobs = []
+    training_image_jobs = {}
     folders_to_delete = []
     elapsed_sec = 0
     curr_training_image_num = 0
     for folder_path, dataset in datasets.items():
+        ext = 'tif'
+        if dataset.get('input_is_zarr'):
+            ext = 'zarr'
         orig_folder_path = folder_path
         metadata = dataset.copy()
+        metadata['input_folder'] = orig_folder_path
+        metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, os.path.basename(orig_folder_path)))
+        metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
+        metadata['training_images'] = {}
         if dataset.get('decon'):
             if 'resultDirName' in dataset:
                 folder_path = os.path.join(folder_path, dataset['resultDirName'])
             else:
                 folder_path = os.path.join(folder_path, 'matlab_decon')
-            #folder_path += '/matlab_decon/'
             folders_to_delete.append(folder_path)
         if dataset.get('dsr'):
             if 'DSRDirName' in dataset:
                 folder_path = os.path.join(folder_path, dataset['DSRDirName'])
             else:
                 folder_path = os.path.join(folder_path, 'DSR')
-            #folder_path += '/DSR/'
             if not dataset.get('decon'):
                 folders_to_delete.append(folder_path)
+
+        # Create new Channel Patterns based on tiles
+        channel_patterns_copy = copy.deepcopy(dataset['channelPatterns'])
+        channel_patterns = set()
+        # Define the pattern for chunked files
+        tiled = True
+        pattern = re.compile(r'\d+x_\d+y_\d+z')
+        for channel_pattern in channel_patterns_copy:
+            all_files = [
+                f for f in Path(folder_path).glob('*' + channel_pattern + f'*.{ext}')
+            ]
+            # Extract matching patterns and add to the set
+            for f in all_files:
+                if match := pattern.search(f.name):
+                    channel_patterns.add(f'{channel_pattern}*{match.group(0)}')
+        if channel_patterns:
+            channel_patterns = sorted(channel_patterns)
+            dataset['channelPatterns'] = channel_patterns
+        else:
+            channel_patterns = channel_patterns_copy
+            tiled = False
+        num_orig_patterns = int(len(channel_patterns_copy))
+        curr_channel = -1
+        orig_channel_patterns = {}
+        zarr_channel_pattern = ''
+        curr_data_shape = copy.deepcopy(data_shape)
+        curr_chunk_shape = copy.deepcopy(data_shape)
+        curr_data_shape.insert(0, 1)
+        curr_data_shape.append(num_orig_patterns)
+        curr_chunk_shape.insert(0, 1)
+        curr_chunk_shape.append(1)
         for channel_pattern in dataset['channelPatterns']:
+            orig_channel_pattern = copy.deepcopy(channel_pattern)
+            if tiled:
+                orig_channel_pattern = orig_channel_pattern.split('*', 1)[0]
             if dataset.get('decon') or dataset.get('dsr'):
-                elapsed_sec = decon_dsr_job_times[f'Folder: {orig_folder_path} Channel: {channel_pattern}']
+                elapsed_sec = decon_dsr_job_times[f'Folder: {orig_folder_path} Channel: {orig_channel_pattern}']
             else:
                 elapsed_sec = 0
-            batch_start_number = 0
-            ext = 'tif'
-            if dataset.get('input_is_zarr'):
-                ext = 'zarr'
+
             files = glob.glob(f'{folder_path}/*{channel_pattern}*.{ext}')
             file_count = len(files)
             num_images_per_dataset = math.floor(file_count / batch_size)
+            if not num_images_per_dataset:
+                raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
+                                f'Found {file_count} files and the batch size is {batch_size}.')
             bboxes = get_chunk_bboxes(folder_path, files[0], (batch_size, 128, 128, 128), dataset.get('input_is_zarr'))
             num_chunks_per_image = len(bboxes)
+
+            if not orig_channel_pattern in orig_channel_patterns:
+                orig_channel_patterns[orig_channel_pattern] = True
+                curr_channel += 1
+                zarr_out_folder = str(os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
+                zarr_channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
+                curr_data_shape[0] = num_images_per_dataset*num_chunks_per_image
+                zarr_spec = {
+                    'driver': 'zarr',
+                    'kvstore': {
+                        'driver': 'file',
+                        'path': f'{os.path.join(os.path.normpath(zarr_out_folder), zarr_channel_pattern)}'
+                    },
+                    'metadata': {
+                        'dtype': '<u2',
+                        'shape': curr_data_shape,
+                        'chunks': curr_chunk_shape,
+                        'compressor': {'blocksize': 0, 'clevel': 1, 'cname': 'zstd', 'id': 'blosc', 'shuffle': 1},
+                        'fill_value': 0,
+                        'order': 'C'
+                    },
+                    'create': True,
+                    "delete_existing": True
+                }
+                ts.open(zarr_spec).result()
+            batch_start_number = 0
             input_is_zarr_filenames = dataset.get('input_is_zarr')
             if dataset.get('decon') or dataset.get('dsr'):
                 input_is_zarr_filenames = False
             filenames = get_filenames(orig_folder_path, channel_pattern, input_is_zarr_filenames)
-            if not num_images_per_dataset:
-                raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
-                                f'Found {file_count} files and the batch size is {batch_size}.')
-            metadata['input_folder'] = orig_folder_path
-            metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, os.path.basename(orig_folder_path)))
-            metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
             metadata['elapsed_sec'] = elapsed_sec
             for i in range(num_images_per_dataset):
-                script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, output_folder,
+                script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, curr_channel, output_folder,
                                                               (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
                                                               elapsed_sec, orig_folder_path, log_dir)
+                key = f'Folder: {folder_path} Channel: {channel_pattern}'
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,
                                                       stderr=subprocess.PIPE)
                 training_image_job.stdin.write(script)
-                training_image_jobs.append(training_image_job)
-                metadata['training_images'] = {}
-                metadata_filenames = ','.join(filenames[i * batch_size:(i * batch_size) + batch_size])
-                metadata['training_images'][metadata_filenames] = {}
-                metadata['training_images'][metadata_filenames]['channelPatterns'] = [channel_pattern]
-                metadata['training_images'][metadata_filenames]['filenames'] = {}
+                training_image_job.stdin.close()
+                training_image_jobs[key] = training_image_job
+
+                #metadata_filenames = ','.join(filenames[i * batch_size:(i * batch_size) + batch_size])
+                if tiled:
+                    channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
+                metadata_filenames = filenames[i * batch_size:(i * batch_size) + batch_size]
+                if not metadata['training_images'].get(channel_pattern):
+                    metadata['training_images'][channel_pattern] = {}
+                if not metadata['training_images'][channel_pattern].get('channelPatterns'):
+                    metadata['training_images'][channel_pattern]['channelPatterns'] = []
+                metadata['training_images'][channel_pattern]['channelPatterns'].append(orig_channel_pattern)
+                metadata['training_images'][channel_pattern]['filenames'] = metadata_filenames
+                if not metadata['training_images'][channel_pattern].get('chunk_names'):
+                    metadata['training_images'][channel_pattern]['chunk_names'] = {}
                 for j in range(num_chunks_per_image):
-                    filename = f'{((i * num_chunks_per_image) + j)}.zarr'
-                    metadata['training_images'][metadata_filenames]['filenames'][filename] = {}
-                    metadata['training_images'][metadata_filenames]['filenames'][filename]['bbox'] = bboxes[j]
+                    filename = f'{((i * num_chunks_per_image) + j)}.0.0.0.0.{curr_channel}'
+                    metadata['training_images'][channel_pattern]['chunk_names'][filename] = {}
+                    metadata['training_images'][channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
                 curr_training_image_num += num_chunks_per_image
                 datasets[orig_folder_path]['num_chunks_per_image'] = num_chunks_per_image
         datasets[orig_folder_path]['metadata'] = metadata
         datasets[orig_folder_path]['num_training_images'] = curr_training_image_num
 
     print('Waiting for Training image creation jobs to finish')
+    while training_image_jobs:
+        for key, training_image_job in training_image_jobs.copy().items():
+            if training_image_job.poll() is not None:
+                print(f'Job for {key} Finished!')
+                del training_image_jobs[key]
+        time.sleep(1)
+    '''
     for training_image_job in training_image_jobs:
         stdout, stderr = training_image_job.communicate()
         print(f'Job {stdout.strip().split()[-1]} Finished!')
+    '''
     print('All Training image creation jobs done!')
-    datasets_copy = copy.deepcopy(datasets)
-    for folder_path, dataset in datasets_copy.items():
-        files = glob.glob(f'{dataset["metadata"]["output_folder"]}/*.zarr')
-        files_sorted = sorted(files, key=lambda x: int(os.path.basename(x).split('.')[0]))
-        num_files = len(files_sorted)
-        if num_files < dataset['num_training_images']:
-            i = 0
-            j = 1
-            for filenames_str, training_image_info in dataset['metadata']['training_images'].items():
-                datasets[folder_path]['metadata']['training_images'][filenames_str]['filenames'] = {}
-                for filename, zarr_info in training_image_info['filenames'].items():
-                    if i >= num_files:
-                        break
-                    #curr_num = int(filename.split('.')[0])
-                    curr_file_num = int(os.path.basename(files_sorted[i]).split('.')[0])
-                    if curr_file_num > dataset['num_chunks_per_image'] * (j):
-                        j += 1
-                        break
-                    datasets[folder_path]['metadata']['training_images'][filenames_str]['filenames'][f'{i}.zarr'] = \
-                    training_image_info['filenames'][f'{curr_file_num}.zarr']
-                    os.rename(files_sorted[i], os.path.join(dataset['metadata']['output_folder'], f'{i}.zarr'))
-                    i += 1
+
+    #datasets_copy = copy.deepcopy(datasets)
+    for folder_path, dataset in datasets.items():
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
         with open(
                 f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',

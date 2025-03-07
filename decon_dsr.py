@@ -174,9 +174,9 @@ if __name__ == '__main__':
                 if param in valid_dsr_params:
                     kwargs[param] = value
             kwargs['channelPatterns'] = channel_patterns
+            kwargs['saveZarr'] = True
             if decon:
                 kwargs['zarrFile'] = True
-                kwargs['saveZarr'] = True
                 if 'resultDirName' in dataset:
                     folder_path = os.path.join(folder_path, dataset['resultDirName'])
                 else:

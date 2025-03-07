@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import glob
@@ -10,6 +11,8 @@ import tensorstore as ts
 import cpptiff
 import zarr
 import json
+
+
 #from importlib.metadata import version
 
 
@@ -62,30 +65,21 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
 
 
 def write_zarr_chunks(args):
-    out_folder, out_name, data_shape, data, dataset, folder_path, channel_pattern, filenames, bbox, date, elapsed_sec = args
+    out_folder, out_name, data, dataset, date, occ_ratios = args
+    occ_ratio = np.mean(occ_ratios)
     data = data[..., np.newaxis]
-    data_shape.append(1)
-    out_folder = str(os.path.join(out_folder, *date, os.path.basename(dataset['input_folder'])))
     zarr_spec = {
         'driver': 'zarr',
         'kvstore': {
             'driver': 'file',
-            'path': f'{os.path.normpath(os.path.join(out_folder, str(out_name)))}.zarr'
+            'path': f'{os.path.normpath(out_folder)}.zarr'
         },
-        'metadata': {
-            'dtype': '<u2',
-            'shape': data_shape,
-            'chunks': data_shape,
-            'compressor': {'blocksize': 0, 'clevel': 1, 'cname': 'zstd', 'id': 'blosc', 'shuffle': 1},
-            'fill_value': 0,
-            'order': 'F'
-        },
-        'create': True,
-        'delete_existing': False
+        'create': False,
     }
 
     zarr_file = ts.open(zarr_spec).result()
-    zarr_file.write(data).result()
+    #zarr_file.write(data).result()
+    zarr_file[out_name, ...] = data
     '''
     dataset['output_folder'] = out_folder
     dataset['training_image_filenames'] = filenames
@@ -103,7 +97,7 @@ def write_zarr_chunks(args):
 
 def process_image(args):
     """Function to read and process an image."""
-    index, filename, folder_path, input_is_zarr, data_shape, bboxes, remove_background, bad_chunks = args
+    index, filename, folder_path, input_is_zarr, data_shape, bboxes, num_bboxes, remove_background = args
     if not input_is_zarr:
         #im = cpptiff.read_tiff(os.path.join(folder_path, filename), [0, bboxes[-1][1]])
         im = cpptiff.read_tiff(os.path.join(folder_path, filename))
@@ -125,29 +119,25 @@ def process_image(args):
     if remove_background:
         nstddevs = 2
         im = np.clip(im - 100 - (np.std(im) * nstddevs), 0, np.iinfo(np.uint16).max).astype(np.uint16)
-    chunks = np.zeros(tuple(data_shape[-3:]) + (len(bboxes),), dtype=np.uint16, order='F')
+    chunks = np.zeros(tuple(data_shape[-3:]) + (num_bboxes,), dtype=np.uint16, order='F')
     min_val = np.percentile(im, 0.1)
     max_val = np.percentile(im, 99.9)
+    occ_ratios = np.zeros(num_bboxes, dtype=np.float32, order='F')
     for i, bbox in enumerate(bboxes):
-        if i in bad_chunks:
-            continue
         chunk = im[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]]
         within_bounds = (chunk > min_val) & (chunk < max_val)
-        percentage_within = np.mean(within_bounds)
-        if percentage_within >= .8:
-            chunks[:, :, :, i] = chunk
-        else:
-            bad_chunks[i] = True
+        occ_ratios[i] = np.mean(within_bounds)
+        chunks[:, :, :, i] = chunk
 
     '''
     elif im.itemsize > 2:
         im = np.clip(im, 0, np.iinfo(np.uint16).max).astype(np.uint16)
     '''
-    return index, chunks  # Return index and processed image
+    return index, chunks, occ_ratios  # Return index and processed image
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
-                         input_is_zarr, date, elapsed_sec,
+                         input_is_zarr, date, channel_num,
                          data_shape=None,
                          remove_background=False):
     if not data_shape:
@@ -156,27 +146,29 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     num_bboxes = len(bboxes)
 
     data = np.zeros(tuple(data_shape) + (len(bboxes),), dtype=np.uint16, order='F')
-
-
-
-    with Manager() as manager:
-        bad_chunks = manager.dict()
-        args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, remove_background, bad_chunks) for i in
-                     range(len(filenames))]
-        with ProcessPoolExecutor() as executor:
-            for i, chunks in executor.map(process_image, args_list):
-                data[i, :, :, :, :] = chunks
-                #bad_chunks = {**bad_chunks, **bad_chunks_i}
-        bad_chunks = dict(bad_chunks)
-
-    args_list_chunks = [
-        (out_folder, out_name + i, data_shape, data[:, :, :, :, i], dataset, folder_path, channel_pattern, filenames,
-         bboxes[i], date, elapsed_sec)
-        for i in
-        range(num_bboxes) if not bad_chunks.get(i, False)]
+    num_files = len(filenames)
+    occ_ratios = np.zeros((num_files, num_bboxes), dtype=np.float32, order='F')
+    args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, num_bboxes, remove_background) for i
+                 in
+                 range(num_files)]
     with ProcessPoolExecutor() as executor:
-        for result in executor.map(write_zarr_chunks, args_list_chunks):
-            pass
+        for i, chunks, occ_ratios_i in executor.map(process_image, args_list):
+            data[i, :, :, :, :] = chunks
+            occ_ratios[i, :] = occ_ratios_i
+
+    data = np.moveaxis(data, -1, 0)
+    data = data[..., np.newaxis]
+    # Create the Zarr file for the dataset
+    out_folder = str(os.path.join(out_folder, *date, os.path.basename(dataset['input_folder'])))
+    zarr_spec = {
+        'driver': 'zarr',
+        'kvstore': {
+            'driver': 'file',
+            'path': f'{os.path.join(os.path.normpath(out_folder),channel_pattern)}.zarr'
+        }
+    }
+    zarr_file = ts.open(zarr_spec).result()
+    zarr_file[out_name:out_name+num_bboxes, :, :, :, :, channel_num:channel_num+1] = data
 
 
 if __name__ == '__main__':
@@ -190,6 +182,9 @@ if __name__ == '__main__':
                     help="Paths to the original folder containing tiff files separated by comma")
     ap.add_argument('--channel-patterns', type=lambda s: list(map(str, s.split(','))), required=True,
                     help="Channel patterns separated by comma")
+    ap.add_argument("--tiled", action="store_true", help="Use Zarr instead of tiff for input")
+    ap.add_argument('--channel-num', type=int, required=True,
+                    help="Zarr channel number")
     ap.add_argument('--output-folder', type=str, required=True,
                     help="Folder to write the data to")
     ap.add_argument('--output-name-start-number', type=int, required=True,
@@ -208,6 +203,8 @@ if __name__ == '__main__':
     folder_paths = args.folder_paths
     orig_folder_paths = args.orig_folder_paths
     channel_patterns = args.channel_patterns
+    tiled = args.tiled
+    channel_num = args.channel_num
     output_folder = args.output_folder
     output_name_start_number = args.output_name_start_number
     batch_start_number = args.batch_start_number
@@ -228,10 +225,12 @@ if __name__ == '__main__':
         for channel_pattern in channel_patterns:
             filenames = get_filenames(folder_path, channel_pattern, input_is_zarr)
             start = time.time()
-
+            if tiled:
+                channel_pattern = channel_pattern.split("*", 1)[1]
+            #channel_pattern = channel_pattern.replace('*','_')
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
             convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
-                                 output_name_start_number, batch_size, input_is_zarr, date, elapsed_sec)
+                                 output_name_start_number, batch_size, input_is_zarr, date, channel_num)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")

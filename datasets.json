@@ -3,9 +3,11 @@
         "decon": true,
         "dsr": true,
         "channelPatterns": [
+            "CamA",
             "CamB"
         ],
         "psfFullpaths": [
+            "/clusterfs/fiona/matthewmueller/Downloads/forMLPipeline/PetaKit5D_demo_cell_image_dataset/PSF/560_c.tif",
             "/clusterfs/fiona/matthewmueller/Downloads/forMLPipeline/PetaKit5D_demo_cell_image_dataset/PSF/488_2_c.tif"
         ],
         "parseCluster": true,
