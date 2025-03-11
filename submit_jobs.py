@@ -21,7 +21,7 @@ from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 
-def create_sbatch_matlab_script(fn, fn_psf, timepoint_i, log_dir=''):
+def create_sbatch_matlab_script(fn, fn_psf, chunk_i, timepoint_i, channel_i, log_dir=''):
     cpus_per_task = 1
     return f'''#!/bin/sh
 #SBATCH --qos=abc_high
@@ -32,7 +32,7 @@ def create_sbatch_matlab_script(fn, fn_psf, timepoint_i, log_dir=''):
 #SBATCH --mem-per-cpu=21000
 #SBATCH --output={log_dir}/%j.out
 cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch \
-"python_FFT2OTF_support_ratio({fn},{fn_psf},{timepoint_i},{sys.executable})"
+"python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{sys.executable}\')"
 '''
 
 
@@ -342,12 +342,25 @@ if __name__ == '__main__':
         time.sleep(1)
     print('All Training image creation jobs done!')
 
+    # Matlab processing
+    for folder_path, dataset in datasets.items():
+        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+            training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
+            for chunk_name, chunk_names in training_images['chunk_names'].items():
+                split_chunk_name = chunk_name.split('.')
+                channel_i = int(split_chunk_name[5])
+                script = create_sbatch_matlab_script(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
+                                                     split_chunk_name[0], split_chunk_name[1], channel_i)
+                print(script)
+
+
     for folder_path, dataset in datasets.items():
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
         with open(
                 f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
                 'w') as outfile:
             outfile.write(metadata_object)
+
     if folders_to_delete:
         print('Cleaning up intermediate results')
         for folder_to_delete in folders_to_delete:

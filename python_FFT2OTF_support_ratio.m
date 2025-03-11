@@ -1,4 +1,4 @@
-function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, timepoint_i, python_path, varargin)
+function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, chunk_i, timepoint_i, channel_i, python_path, varargin)
 % calculate the ratio fo OTF support
 
 % Parse inputs
@@ -46,7 +46,7 @@ end
 psf = im;
 
 %volume = readtiff(fn);
-volume = ts_read_zarr(fn, timepoint_i, python_path);
+volume = ts_read_zarr(fn, chunk_i, timepoint_i, channel_i, python_path);
 %mode(volume(:))
 volume = volume - mode(volume(:));
 volume(volume(:)<0) = 0;
@@ -109,7 +109,7 @@ support_ratio.moment_OTF_embedding_norm = sum(moment_OTF_embedding(:))./sum(mome
 support_ratio.integratedPhotons = IPhotons;
 
 
-filename = [fn(1:end-5) '_timepoint' num2str(timepoint_i) '.json'];
+filename = [fn(1:end-5) '_chunk' num2str(chunk_i) '_timepoint' num2str(timepoint_i) '_channel' num2str(channel_i) '.json'];
 modifiedJsonText = jsonencode(support_ratio);
 fid = fopen(filename, 'w');
 if fid == -1
