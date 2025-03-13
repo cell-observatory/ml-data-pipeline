@@ -164,11 +164,23 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
         'driver': 'zarr',
         'kvstore': {
             'driver': 'file',
-            'path': f'{os.path.join(os.path.normpath(out_folder),channel_pattern)}.zarr'
+            'path': f'{os.path.join(os.path.normpath(out_folder), channel_pattern)}.zarr'
         }
     }
     zarr_file = ts.open(zarr_spec).result()
-    zarr_file[out_name:out_name+num_bboxes, :, :, :, :, channel_num:channel_num+1] = data
+    zarr_file[out_name:out_name + num_bboxes, :, :, :, :, channel_num:channel_num + 1] = data
+
+    occ_ratio_means = np.mean(occ_ratios, axis=0)
+    occ_ratio_json = {}
+    curr_mean = 0
+    for i in range(out_name, out_name + num_bboxes):
+        occ_ratio_json[f'{i}.0.0.0.0.{channel_num}'] = float(occ_ratio_means[curr_mean])
+        curr_mean += 1
+    metadata_object = json.dumps(occ_ratio_json, indent=4)
+    with open(
+            f'{os.path.normpath(os.path.join(os.path.normpath(out_folder), channel_pattern))}_{out_name}img_{channel_num}ch.json',
+            'w') as outfile:
+        outfile.write(metadata_object)
 
 
 if __name__ == '__main__':

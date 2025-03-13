@@ -22,7 +22,7 @@ from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 
 def create_sbatch_matlab_script(fn, fn_psf, chunk_i, timepoint_i, channel_i, log_dir=''):
-    cpus_per_task = 1
+    cpus_per_task = 2
     return f'''#!/bin/sh
 #SBATCH --qos=abc_high
 #SBATCH --partition=abc
@@ -31,7 +31,7 @@ def create_sbatch_matlab_script(fn, fn_psf, chunk_i, timepoint_i, channel_i, log
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --mem-per-cpu=21000
 #SBATCH --output={log_dir}/%j.out
-cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch \
+cd {os.path.dirname(os.path.abspath(__file__))};matlab -nojvm -batch \
 "python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{sys.executable}\')"
 '''
 
@@ -148,6 +148,7 @@ if __name__ == '__main__':
     matches = re.findall(r'"(.*?)": \[', decon_dsr_text)
     valid_params = {key: True for key in matches}
 
+    decon_dsr_time = time.time()
     for folder_path, dataset in datasets.items():
         if dataset.get('decon') or dataset.get('dsr'):
             run_decon_dsr = True
@@ -185,13 +186,15 @@ if __name__ == '__main__':
                     print(f'Job for {key} Finished!')
                     del decon_dsr_jobs[key]
             time.sleep(1)
-        print('All Decon/DSR jobs done!')
+        print(f'All Decon/DSR jobs finished in {time.time() - decon_dsr_time} seconds!')
+
 
     training_image_jobs = {}
     folders_to_delete = []
     elapsed_sec = 0
     curr_training_image_num = 0
     zarr_channel_patterns = {}
+    training_image_time = time.time()
     for folder_path, dataset in datasets.items():
         ext = 'tif'
         if dataset.get('input_is_zarr'):
@@ -340,19 +343,94 @@ if __name__ == '__main__':
                 print(f'Job for {key} Finished!')
                 del training_image_jobs[key]
         time.sleep(1)
-    print('All Training image creation jobs done!')
+    print(f'All Training image creation jobs finished in {time.time() - training_image_time} seconds!')
+
+    # Get occ ratios
+    print('Collecting occupancy ratios')
+    occ_ratios_time = time.time()
+    for folder_path, dataset in datasets.items():
+        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+            zarr_filename = zarr_filename[:-5]
+            occ_ratio_dict = None
+            for filename in os.listdir(datasets[folder_path]['metadata']['output_folder']):
+                if filename.endswith(".json") and zarr_filename in filename:
+                    file_path = os.path.join(datasets[folder_path]['metadata']['output_folder'], filename)
+                    try:
+                        with open(file_path, "r") as f:
+                            occ_ratio_dict = json.load(f)
+                        os.remove(file_path)
+                        for chunk_name, occ_ratio in occ_ratio_dict.items():
+                            training_images['chunk_names'][chunk_name]['occ_ratio'] = occ_ratio
+                    except (json.JSONDecodeError, FileNotFoundError) as e:
+                        print(f"Error reading {file_path}: {e}")
+    print(f'All occupancy ratios collected in {time.time() - occ_ratios_time} seconds!')
+
 
     # Matlab processing
+    support_ratio_jobs = {}
+    support_ratio_time = time.time()
     for folder_path, dataset in datasets.items():
         for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
             training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
-            for chunk_name, chunk_names in training_images['chunk_names'].items():
+            for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
                 split_chunk_name = chunk_name.split('.')
+                chunk_i = split_chunk_name[0]
+                timepoint_i = split_chunk_name[1]
                 channel_i = int(split_chunk_name[5])
-                script = create_sbatch_matlab_script(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
-                                                     split_chunk_name[0], split_chunk_name[1], channel_i)
-                print(script)
+                if chunk_name_dict['occ_ratio'] == 0:
+                    chunk_name_dict['FFTratio_mean'] = 0
+                    chunk_name_dict['FFTratio_median'] = 0
+                    chunk_name_dict['FFTratio_sd'] = 0
+                    chunk_name_dict['embedding_sd'] = 0
+                    chunk_name_dict['OTF_embedding_sum'] = 0
+                    chunk_name_dict['OTF_embedding_vol'] = 0
+                    chunk_name_dict['OTF_embedding_normIntegral'] = 0
+                    chunk_name_dict['moment_OTF_embedding_sum'] = 0
+                    chunk_name_dict['moment_OTF_embedding_ideal_sum'] = 0
+                    chunk_name_dict['moment_OTF_embedding_norm'] = 0
+                    chunk_name_dict['integratedPhotons'] = 0
+                    continue
 
+                script = create_sbatch_matlab_script(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
+                                                     chunk_i, timepoint_i, channel_i, log_dir)
+
+                key = f'{training_image},{timepoint_i},{channel_i}'
+                support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                      stdout=subprocess.PIPE,
+                                                      stderr=subprocess.PIPE)
+
+                support_ratio_job.stdin.write(script)
+                support_ratio_job.stdin.close()
+                support_ratio_jobs[key] = support_ratio_job
+
+    print('Waiting for Support Ratio jobs to finish')
+    while support_ratio_jobs:
+        for key, support_ratio_job in support_ratio_jobs.copy().items():
+            if support_ratio_job.poll() is not None:
+                #print(f'Job for {key} Finished!')
+                del support_ratio_jobs[key]
+        time.sleep(1)
+    print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
+
+    # Get occ ratios
+    print('Collecting Support Ratio metadata')
+    support_ratio_metadata_time = time.time()
+    for folder_path, dataset in datasets.items():
+        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+            zarr_filename = zarr_filename[:-5]
+            support_ratio_dict = None
+            for filename in os.listdir(datasets[folder_path]['metadata']['output_folder']):
+                if filename.endswith(".json") and zarr_filename in filename:
+                    file_path = os.path.join(datasets[folder_path]['metadata']['output_folder'], filename)
+                    try:
+                        with open(file_path, "r") as f:
+                            support_ratio_dict = json.load(f)
+                        os.remove(file_path)
+                        for chunk_name, support_ratio in support_ratio_dict.items():
+                            training_images['chunk_names'][chunk_name].update(support_ratio)
+                    except (json.JSONDecodeError, FileNotFoundError) as e:
+                        print(f"Error reading {file_path}: {e}")
+    print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')
 
     for folder_path, dataset in datasets.items():
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
