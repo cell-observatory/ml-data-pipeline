@@ -11,5 +11,6 @@
   "GNUparallel": false,
   "jobTimeLimit": 12,
   "maxJobNum": 5000,
-  "taskBatchNum": 1
+  "taskBatchNum": 1,
+  "masterCompute": true
 }

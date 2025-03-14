@@ -24,6 +24,7 @@
         "background": 100,
         "deconIter": 2,
         "edgeErosion": 8,
-        "save16bit": true
+        "save16bit": true,
+        "masterCompute": true
     }
 }

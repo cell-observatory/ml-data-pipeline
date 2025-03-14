@@ -20,9 +20,12 @@ import time
 from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
+def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i):
+    return f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{sys.executable}\');'
 
-def create_sbatch_matlab_script(fn, fn_psf, chunk_i, timepoint_i, channel_i, log_dir=''):
-    cpus_per_task = 2
+
+def create_sbatch_matlab_script(matlab_func_str, log_dir=''):
+    cpus_per_task = 1
     return f'''#!/bin/sh
 #SBATCH --qos=abc_high
 #SBATCH --partition=abc
@@ -31,8 +34,7 @@ def create_sbatch_matlab_script(fn, fn_psf, chunk_i, timepoint_i, channel_i, log
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --mem-per-cpu=21000
 #SBATCH --output={log_dir}/%j.out
-cd {os.path.dirname(os.path.abspath(__file__))};matlab -nojvm -batch \
-"python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{sys.executable}\')"
+cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch "{matlab_func_str}exit;"
 '''
 
 
@@ -122,6 +124,8 @@ if __name__ == '__main__':
                     help="Comma separated date Year,Month,Day")
     ap.add_argument('--num-timepoints-per-image', type=int, default=16,
                     help="Number of timepoints in a training image")
+    ap.add_argument('--matlab-batch-size', type=int, default=2,
+                    help="How many Matlab function calls to run in a Matlab session")
     args = ap.parse_args()
     input_file = args.input_file
     output_folder = args.output_folder
@@ -129,6 +133,7 @@ if __name__ == '__main__':
     cpu_config_file = args.cpu_config_file
     data_shape = args.data_shape
     batch_size = args.num_timepoints_per_image
+    matlab_batch_size = args.matlab_batch_size
     data_shape.insert(0, batch_size)
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
@@ -369,7 +374,12 @@ if __name__ == '__main__':
     # Matlab processing
     support_ratio_jobs = {}
     support_ratio_time = time.time()
+    training_image = ''
+    chunk_i = '0'
+    channel_i = 0
     for folder_path, dataset in datasets.items():
+        curr_matlab_func = 0
+        matlab_func_str = ''
         for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
             training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
             for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
@@ -390,18 +400,34 @@ if __name__ == '__main__':
                     chunk_name_dict['moment_OTF_embedding_norm'] = 0
                     chunk_name_dict['integratedPhotons'] = 0
                     continue
+                matlab_func_str += create_matlab_func(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
+                                                     chunk_i, timepoint_i, channel_i)
+                curr_matlab_func += 1
+                if curr_matlab_func == matlab_batch_size:
+                    script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-                script = create_sbatch_matlab_script(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
-                                                     chunk_i, timepoint_i, channel_i, log_dir)
+                    key = f'{training_image},{chunk_i},{channel_i}'
+                    support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                          stdout=subprocess.PIPE,
+                                                          stderr=subprocess.PIPE)
 
-                key = f'{training_image},{timepoint_i},{channel_i}'
-                support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                      stdout=subprocess.PIPE,
-                                                      stderr=subprocess.PIPE)
+                    support_ratio_job.stdin.write(script)
+                    support_ratio_job.stdin.close()
+                    support_ratio_jobs[key] = support_ratio_job
+                    curr_matlab_func = 0
+                    matlab_func_str = ''
+        if curr_matlab_func > 0:
+            script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-                support_ratio_job.stdin.write(script)
-                support_ratio_job.stdin.close()
-                support_ratio_jobs[key] = support_ratio_job
+            key = f'{training_image},{chunk_i},{channel_i}'
+            support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                 stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE)
+
+            support_ratio_job.stdin.write(script)
+            support_ratio_job.stdin.close()
+            support_ratio_jobs[key] = support_ratio_job
+
 
     print('Waiting for Support Ratio jobs to finish')
     while support_ratio_jobs:
@@ -425,9 +451,9 @@ if __name__ == '__main__':
                     try:
                         with open(file_path, "r") as f:
                             support_ratio_dict = json.load(f)
-                        os.remove(file_path)
                         for chunk_name, support_ratio in support_ratio_dict.items():
                             training_images['chunk_names'][chunk_name].update(support_ratio)
+                        os.remove(file_path)
                     except (json.JSONDecodeError, FileNotFoundError) as e:
                         print(f"Error reading {file_path}: {e}")
     print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')

@@ -74,7 +74,6 @@ if all(volume == 0, 'all')
     support_ratio.moment_OTF_embedding_norm = 0;
     support_ratio.integratedPhotons = 0;
     
-    %create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio)
     return;
 end
 
@@ -122,7 +121,6 @@ if all(volume == 0, 'all')
     support_ratio.moment_OTF_embedding_norm = 0;
     support_ratio.integratedPhotons = 0;
     
-    %create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio)
     return;
 end
 
@@ -170,17 +168,15 @@ support_ratio.moment_OTF_embedding_ideal_sum = sum(moment_OTF_embedding_ideal(:)
 support_ratio.moment_OTF_embedding_norm = sum(moment_OTF_embedding(:))./sum(moment_OTF_embedding_ideal(:));
 support_ratio.integratedPhotons = IPhotons;
 
-%create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio)
 return;
 
 end
 
 function create_json_file(fn, chunk_i, channel_i, support_ratio_avg)
-    filename = [fn(1:end-5) '_chunk' num2str(chunk_i) '_channel' num2str(channel_i) '.json'];
+    filename = [fn(1:end-5) '_c' num2str(chunk_i) '_ch' num2str(channel_i) '.json'];
     json_data = containers.Map();
     json_key = [num2str(chunk_i) '.0.0.0.0.' num2str(channel_i)];
     json_data(json_key) = support_ratio_avg;
-    %wrapped_support_ratio_avg = struct([num2str(chunk_i) '.0.0.0.0.' num2str(channel_i)], support_ratio_avg);
     modifiedJsonText = jsonencode(json_data);
     fid = fopen(filename, 'w');
     if fid == -1
