@@ -55,7 +55,6 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
         if orig_folder_path:
             extra_params += f'--orig-folder-paths {orig_folder_path} '
     elif python_script_name == 'decon_dsr.py':
-        cpus_per_task = 24
         if input_file:
             extra_params += f'--input-file {input_file} '
         if decon:
@@ -126,6 +125,7 @@ if __name__ == '__main__':
                     help="Number of timepoints in a training image")
     ap.add_argument('--matlab-batch-size', type=int, default=2,
                     help="How many Matlab function calls to run in a Matlab session")
+    ap.add_argument("--ignore-support-ratio", action="store_true", help="Do not run the support ratio processing")
     args = ap.parse_args()
     input_file = args.input_file
     output_folder = args.output_folder
@@ -134,6 +134,7 @@ if __name__ == '__main__':
     data_shape = args.data_shape
     batch_size = args.num_timepoints_per_image
     matlab_batch_size = args.matlab_batch_size
+    ignore_support_ratio = args.ignore_support_ratio
     data_shape.insert(0, batch_size)
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
@@ -275,7 +276,8 @@ if __name__ == '__main__':
             if not orig_channel_pattern in orig_channel_patterns:
                 orig_channel_patterns[orig_channel_pattern] = True
                 curr_channel += 1
-                curr_data_shape[0] = num_images_per_dataset*num_chunks_per_image
+                curr_data_shape[0] = num_chunks_per_image
+                curr_data_shape[1] = num_images_per_dataset*batch_size
 
             zarr_channel_pattern = f'{channel_pattern}.zarr'
             if tiled:
@@ -314,7 +316,7 @@ if __name__ == '__main__':
                                                               (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
                                                               elapsed_sec, orig_folder_path, log_dir)
-                key = f'Folder: {folder_path} Channel: {channel_pattern}'
+                key = f'Folder: {folder_path} Timepoint: {i} Channel: {channel_pattern}'
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,
                                                       stderr=subprocess.PIPE)
@@ -327,13 +329,14 @@ if __name__ == '__main__':
                 if not metadata['training_images'].get(zarr_channel_pattern):
                     metadata['training_images'][zarr_channel_pattern] = {}
                 if not metadata['training_images'][zarr_channel_pattern].get('channelPatterns'):
-                    metadata['training_images'][zarr_channel_pattern]['channelPatterns'] = []
-                metadata['training_images'][zarr_channel_pattern]['channelPatterns'].append(orig_channel_pattern)
-                metadata['training_images'][zarr_channel_pattern]['filenames'] = metadata_filenames
+                    metadata['training_images'][zarr_channel_pattern]['channelPatterns'] = {}
+                if not metadata['training_images'][zarr_channel_pattern]['channelPatterns'].get(orig_channel_pattern):
+                    metadata['training_images'][zarr_channel_pattern]['channelPatterns'][orig_channel_pattern] = {}
+                metadata['training_images'][zarr_channel_pattern]['channelPatterns'][orig_channel_pattern][i] = metadata_filenames
                 if not metadata['training_images'][zarr_channel_pattern].get('chunk_names'):
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'] = {}
                 for j in range(num_chunks_per_image):
-                    filename = f'{((i * num_chunks_per_image) + j)}.0.0.0.0.{curr_channel}'
+                    filename = f'{j}.{i}.0.0.0.{curr_channel}'
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
                 curr_training_image_num += num_chunks_per_image
@@ -371,92 +374,93 @@ if __name__ == '__main__':
     print(f'All occupancy ratios collected in {time.time() - occ_ratios_time} seconds!')
 
 
-    # Matlab processing
-    support_ratio_jobs = {}
-    support_ratio_time = time.time()
-    training_image = ''
-    chunk_i = '0'
-    channel_i = 0
-    for folder_path, dataset in datasets.items():
-        curr_matlab_func = 0
-        matlab_func_str = ''
-        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
-            training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
-            for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
-                split_chunk_name = chunk_name.split('.')
-                chunk_i = split_chunk_name[0]
-                timepoint_i = split_chunk_name[1]
-                channel_i = int(split_chunk_name[5])
-                if chunk_name_dict['occ_ratio'] == 0:
-                    chunk_name_dict['FFTratio_mean'] = 0
-                    chunk_name_dict['FFTratio_median'] = 0
-                    chunk_name_dict['FFTratio_sd'] = 0
-                    chunk_name_dict['embedding_sd'] = 0
-                    chunk_name_dict['OTF_embedding_sum'] = 0
-                    chunk_name_dict['OTF_embedding_vol'] = 0
-                    chunk_name_dict['OTF_embedding_normIntegral'] = 0
-                    chunk_name_dict['moment_OTF_embedding_sum'] = 0
-                    chunk_name_dict['moment_OTF_embedding_ideal_sum'] = 0
-                    chunk_name_dict['moment_OTF_embedding_norm'] = 0
-                    chunk_name_dict['integratedPhotons'] = 0
-                    continue
-                matlab_func_str += create_matlab_func(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
-                                                     chunk_i, timepoint_i, channel_i)
-                curr_matlab_func += 1
-                if curr_matlab_func == matlab_batch_size:
-                    script = create_sbatch_matlab_script(matlab_func_str, log_dir)
+    # Matlab support ratio processing
+    if not ignore_support_ratio:
+        support_ratio_jobs = {}
+        support_ratio_time = time.time()
+        training_image = ''
+        chunk_i = '0'
+        channel_i = 0
+        for folder_path, dataset in datasets.items():
+            curr_matlab_func = 0
+            matlab_func_str = ''
+            for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+                training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
+                for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
+                    split_chunk_name = chunk_name.split('.')
+                    chunk_i = split_chunk_name[0]
+                    timepoint_i = split_chunk_name[1]
+                    channel_i = int(split_chunk_name[5])
+                    if chunk_name_dict['occ_ratio'] == 0:
+                        chunk_name_dict['FFTratio_mean'] = 0
+                        chunk_name_dict['FFTratio_median'] = 0
+                        chunk_name_dict['FFTratio_sd'] = 0
+                        chunk_name_dict['embedding_sd'] = 0
+                        chunk_name_dict['OTF_embedding_sum'] = 0
+                        chunk_name_dict['OTF_embedding_vol'] = 0
+                        chunk_name_dict['OTF_embedding_normIntegral'] = 0
+                        chunk_name_dict['moment_OTF_embedding_sum'] = 0
+                        chunk_name_dict['moment_OTF_embedding_ideal_sum'] = 0
+                        chunk_name_dict['moment_OTF_embedding_norm'] = 0
+                        chunk_name_dict['integratedPhotons'] = 0
+                        continue
+                    matlab_func_str += create_matlab_func(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
+                                                         chunk_i, timepoint_i, channel_i)
+                    curr_matlab_func += 1
+                    if curr_matlab_func == matlab_batch_size:
+                        script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-                    key = f'{training_image},{chunk_i},{channel_i}'
-                    support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                          stdout=subprocess.PIPE,
-                                                          stderr=subprocess.PIPE)
+                        key = f'{training_image},{chunk_i},{channel_i}'
+                        support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                              stdout=subprocess.PIPE,
+                                                              stderr=subprocess.PIPE)
 
-                    support_ratio_job.stdin.write(script)
-                    support_ratio_job.stdin.close()
-                    support_ratio_jobs[key] = support_ratio_job
-                    curr_matlab_func = 0
-                    matlab_func_str = ''
-        if curr_matlab_func > 0:
-            script = create_sbatch_matlab_script(matlab_func_str, log_dir)
+                        support_ratio_job.stdin.write(script)
+                        support_ratio_job.stdin.close()
+                        support_ratio_jobs[key] = support_ratio_job
+                        curr_matlab_func = 0
+                        matlab_func_str = ''
+            if curr_matlab_func > 0:
+                script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-            key = f'{training_image},{chunk_i},{channel_i}'
-            support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                 stdout=subprocess.PIPE,
-                                                 stderr=subprocess.PIPE)
+                key = f'{training_image},{chunk_i},{channel_i}'
+                support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                     stdout=subprocess.PIPE,
+                                                     stderr=subprocess.PIPE)
 
-            support_ratio_job.stdin.write(script)
-            support_ratio_job.stdin.close()
-            support_ratio_jobs[key] = support_ratio_job
+                support_ratio_job.stdin.write(script)
+                support_ratio_job.stdin.close()
+                support_ratio_jobs[key] = support_ratio_job
 
 
-    print('Waiting for Support Ratio jobs to finish')
-    while support_ratio_jobs:
-        for key, support_ratio_job in support_ratio_jobs.copy().items():
-            if support_ratio_job.poll() is not None:
-                #print(f'Job for {key} Finished!')
-                del support_ratio_jobs[key]
-        time.sleep(1)
-    print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
+        print('Waiting for Support Ratio jobs to finish')
+        while support_ratio_jobs:
+            for key, support_ratio_job in support_ratio_jobs.copy().items():
+                if support_ratio_job.poll() is not None:
+                    #print(f'Job for {key} Finished!')
+                    del support_ratio_jobs[key]
+            time.sleep(1)
+        print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
 
-    # Get occ ratios
-    print('Collecting Support Ratio metadata')
-    support_ratio_metadata_time = time.time()
-    for folder_path, dataset in datasets.items():
-        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
-            zarr_filename = zarr_filename[:-5]
-            support_ratio_dict = None
-            for filename in os.listdir(datasets[folder_path]['metadata']['output_folder']):
-                if filename.endswith(".json") and zarr_filename in filename:
-                    file_path = os.path.join(datasets[folder_path]['metadata']['output_folder'], filename)
-                    try:
-                        with open(file_path, "r") as f:
-                            support_ratio_dict = json.load(f)
-                        for chunk_name, support_ratio in support_ratio_dict.items():
-                            training_images['chunk_names'][chunk_name].update(support_ratio)
-                        os.remove(file_path)
-                    except (json.JSONDecodeError, FileNotFoundError) as e:
-                        print(f"Error reading {file_path}: {e}")
-    print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')
+        # Get occ ratios
+        print('Collecting Support Ratio metadata')
+        support_ratio_metadata_time = time.time()
+        for folder_path, dataset in datasets.items():
+            for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+                zarr_filename = zarr_filename[:-5]
+                support_ratio_dict = None
+                for filename in os.listdir(datasets[folder_path]['metadata']['output_folder']):
+                    if filename.endswith(".json") and zarr_filename in filename:
+                        file_path = os.path.join(datasets[folder_path]['metadata']['output_folder'], filename)
+                        try:
+                            with open(file_path, "r") as f:
+                                support_ratio_dict = json.load(f)
+                            for chunk_name, support_ratio in support_ratio_dict.items():
+                                training_images['chunk_names'][chunk_name].update(support_ratio)
+                            os.remove(file_path)
+                        except (json.JSONDecodeError, FileNotFoundError) as e:
+                            print(f"Error reading {file_path}: {e}")
+        print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')
 
     for folder_path, dataset in datasets.items():
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)

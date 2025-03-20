@@ -64,37 +64,6 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
     return bboxes
 
 
-def write_zarr_chunks(args):
-    out_folder, out_name, data, dataset, date, occ_ratios = args
-    occ_ratio = np.mean(occ_ratios)
-    data = data[..., np.newaxis]
-    zarr_spec = {
-        'driver': 'zarr',
-        'kvstore': {
-            'driver': 'file',
-            'path': f'{os.path.normpath(out_folder)}.zarr'
-        },
-        'create': False,
-    }
-
-    zarr_file = ts.open(zarr_spec).result()
-    #zarr_file.write(data).result()
-    zarr_file[out_name, ...] = data
-    '''
-    dataset['output_folder'] = out_folder
-    dataset['training_image_filenames'] = filenames
-    dataset['training_image_bbox'] = bbox
-    dataset['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
-    dataset['elapsed_sec'] = elapsed_sec
-    dataset['channelPatterns'] = [channel_pattern]
-
-    json_object = json.dumps(dataset, indent=4)
-
-    with open(f'{os.path.normpath(os.path.join(out_folder, str(out_name)))}.json', 'w') as outfile:
-        outfile.write(json_object)
-    '''
-
-
 def process_image(args):
     """Function to read and process an image."""
     index, filename, folder_path, input_is_zarr, data_shape, bboxes, num_bboxes, remove_background = args
@@ -137,7 +106,7 @@ def process_image(args):
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
-                         input_is_zarr, date, channel_num,
+                         input_is_zarr, date, channel_num, timepoint_i,
                          data_shape=None,
                          remove_background=False):
     if not data_shape:
@@ -168,17 +137,17 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
         }
     }
     zarr_file = ts.open(zarr_spec).result()
-    zarr_file[out_name:out_name + num_bboxes, :, :, :, :, channel_num:channel_num + 1] = data
+    zarr_file[:, timepoint_i*batch_size:(timepoint_i + 1)*batch_size, :, :, :, channel_num:channel_num + 1] = data
 
     occ_ratio_means = np.mean(occ_ratios, axis=0)
     occ_ratio_json = {}
     curr_mean = 0
-    for i in range(out_name, out_name + num_bboxes):
-        occ_ratio_json[f'{i}.0.0.0.0.{channel_num}'] = float(occ_ratio_means[curr_mean])
+    for i in range(num_bboxes):
+        occ_ratio_json[f'{i}.{timepoint_i}.0.0.0.{channel_num}'] = float(occ_ratio_means[curr_mean])
         curr_mean += 1
     metadata_object = json.dumps(occ_ratio_json, indent=4)
     with open(
-            f'{os.path.normpath(os.path.join(os.path.normpath(out_folder), channel_pattern))}_{out_name}img_{channel_num}ch.json',
+            f'{os.path.normpath(os.path.join(os.path.normpath(out_folder), channel_pattern))}_{out_name}img_{timepoint_i}t_{channel_num}ch.json',
             'w') as outfile:
         outfile.write(metadata_object)
 
@@ -241,8 +210,9 @@ if __name__ == '__main__':
                 channel_pattern = channel_pattern.split("*", 1)[1]
             #channel_pattern = channel_pattern.replace('*','_')
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
+            timepoint_i = int(batch_start_number/batch_size)
             convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
-                                 output_name_start_number, batch_size, input_is_zarr, date, channel_num)
+                                 output_name_start_number, batch_size, input_is_zarr, date, channel_num, timepoint_i)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")
