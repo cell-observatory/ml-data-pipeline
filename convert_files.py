@@ -106,7 +106,7 @@ def process_image(args):
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
-                         input_is_zarr, date, channel_num, timepoint_i,
+                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version,
                          data_shape=None,
                          remove_background=False):
     if not data_shape:
@@ -130,7 +130,7 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     # Create the Zarr file for the dataset
     out_folder = str(os.path.join(out_folder, *date, os.path.basename(dataset['input_folder'])))
     zarr_spec = {
-        'driver': 'zarr',
+        'driver': output_zarr_version,
         'kvstore': {
             'driver': 'file',
             'path': f'{os.path.join(os.path.normpath(out_folder), channel_pattern)}.zarr'
@@ -179,6 +179,8 @@ if __name__ == '__main__':
                     help="Comma separated date Year,Month,Day")
     ap.add_argument('--elapsed-sec', type=float, required=True,
                     help="Preprocessing time in seconds")
+    ap.add_argument('--output-zarr-version', type=str, default='zarr3',
+                    help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
     args = ap.parse_args()
     input_file = args.input_file
     folder_paths = args.folder_paths
@@ -193,6 +195,7 @@ if __name__ == '__main__':
     input_is_zarr = args.input_is_zarr
     date = args.date
     elapsed_sec = args.elapsed_sec
+    output_zarr_version = args.output_zarr_version
 
     with open(input_file) as f:
         datasets_json = json.load(f)
@@ -212,7 +215,8 @@ if __name__ == '__main__':
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
             timepoint_i = int(batch_start_number/batch_size)
             convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
-                                 output_name_start_number, batch_size, input_is_zarr, date, channel_num, timepoint_i)
+                                 output_name_start_number, batch_size, input_is_zarr, date, channel_num, timepoint_i,
+                                 output_zarr_version)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")

@@ -20,6 +20,48 @@ import time
 from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
+
+def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
+    if zarr_version == 'zarr3':
+        zarr_spec = {
+            'driver': zarr_version,
+            'kvstore': {
+                'driver': 'file',
+                'path': path
+            },
+            'metadata': {
+                'data_type': 'uint16',
+                'shape': data_shape,
+                'chunk_grid': {'name': 'regular', 'configuration': {'chunk_shape': chunk_shape}},
+                'codecs': [{"name": "bytes", "configuration": {"endian": "little"}},
+                           {'name': 'blosc',
+                            'configuration': {'cname': 'zstd', 'clevel': 1, 'blocksize': 0, 'shuffle': 'shuffle'}}],
+                'fill_value': 0,
+            },
+            'create': True,
+            'delete_existing': True
+        }
+    else:
+        zarr_spec = {
+            'driver': zarr_version,
+            'kvstore': {
+                'driver': 'file',
+                'path': path
+            },
+            'metadata': {
+                'dtype': '<u2',
+                'shape': data_shape,
+                'chunks': chunk_shape,
+                'compressor': {'blocksize': 0, 'clevel': 1, 'cname': 'zstd', 'id': 'blosc', 'shuffle': 1},
+                'fill_value': 0,
+                'order': 'C'
+            },
+            'create': True,
+            'delete_existing': True
+        }
+    return zarr_spec
+
+
 def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i):
     return f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{sys.executable}\');'
 
@@ -38,14 +80,15 @@ cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch "{matlab_func_str}
 '''
 
 
-def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, tiled=True, channel_num=0, output_folder='',
+def create_sbatch_script(python_script_name, input_file, folder_path, channel_pattern, tiled=True, channel_num=0,
+                         output_folder='',
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
-                         log_dir='', decon=False, dsr=False):
+                         log_dir='', decon=False, dsr=False, output_zarr_version='zarr3'):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
-        extra_params = f'''--channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} '''
+        extra_params = f'''--channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} --output-zarr-version {output_zarr_version} '''
         if tiled:
             extra_params += '--tiled '
         if input_is_zarr:
@@ -75,15 +118,16 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 '''
 
 
-def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, channel_num, output_folder, output_name_start_num,
-                                         batch_start_number, batch_size,
-                                         input_is_zarr, date_ymd, elapsed_sec, orig_folder_path, log_dir):
+def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, channel_num, output_folder,
+                                         output_name_start_num, batch_start_number, batch_size, input_is_zarr, date_ymd,
+                                         elapsed_sec, orig_folder_path, output_zarr_version, log_dir):
     return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, tiled=tiled,
                                 channel_num=channel_num, output_folder=output_folder,
                                 output_name_start_num=output_name_start_num, batch_start_number=batch_start_number,
                                 batch_size=batch_size,
                                 input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec,
-                                orig_folder_path=orig_folder_path, log_dir=log_dir)
+                                orig_folder_path=orig_folder_path, output_zarr_version=output_zarr_version,
+                                log_dir=log_dir)
 
 
 def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, log_dir):
@@ -126,6 +170,8 @@ if __name__ == '__main__':
     ap.add_argument('--matlab-batch-size', type=int, default=2,
                     help="How many Matlab function calls to run in a Matlab session")
     ap.add_argument("--ignore-support-ratio", action="store_true", help="Do not run the support ratio processing")
+    ap.add_argument('--output-zarr-version', type=str, default='zarr3',
+                    help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
     args = ap.parse_args()
     input_file = args.input_file
     output_folder = args.output_folder
@@ -135,6 +181,7 @@ if __name__ == '__main__':
     batch_size = args.num_timepoints_per_image
     matlab_batch_size = args.matlab_batch_size
     ignore_support_ratio = args.ignore_support_ratio
+    output_zarr_version = args.output_zarr_version
     data_shape.insert(0, batch_size)
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
@@ -193,7 +240,6 @@ if __name__ == '__main__':
                     del decon_dsr_jobs[key]
             time.sleep(1)
         print(f'All Decon/DSR jobs finished in {time.time() - decon_dsr_time} seconds!')
-
 
     training_image_jobs = {}
     folders_to_delete = []
@@ -277,7 +323,7 @@ if __name__ == '__main__':
                 orig_channel_patterns[orig_channel_pattern] = True
                 curr_channel += 1
                 curr_data_shape[0] = num_chunks_per_image
-                curr_data_shape[1] = num_images_per_dataset*batch_size
+                curr_data_shape[1] = num_images_per_dataset * batch_size
 
             zarr_channel_pattern = f'{channel_pattern}.zarr'
             if tiled:
@@ -286,23 +332,9 @@ if __name__ == '__main__':
                 zarr_channel_patterns[zarr_channel_pattern] = True
                 zarr_out_folder = str(
                     os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
-                zarr_spec = {
-                    'driver': 'zarr',
-                    'kvstore': {
-                        'driver': 'file',
-                        'path': f'{os.path.join(os.path.normpath(zarr_out_folder), zarr_channel_pattern)}'
-                    },
-                    'metadata': {
-                        'dtype': '<u2',
-                        'shape': curr_data_shape,
-                        'chunks': curr_chunk_shape,
-                        'compressor': {'blocksize': 0, 'clevel': 1, 'cname': 'zstd', 'id': 'blosc', 'shuffle': 1},
-                        'fill_value': 0,
-                        'order': 'C'
-                    },
-                    'create': True,
-                    "delete_existing": True
-                }
+                zarr_spec = create_zarr_spec(output_zarr_version,
+                                             os.path.join(os.path.normpath(zarr_out_folder), zarr_channel_pattern),
+                                             curr_data_shape, curr_chunk_shape)
                 ts.open(zarr_spec).result()
 
             batch_start_number = 0
@@ -312,10 +344,11 @@ if __name__ == '__main__':
             filenames = get_filenames(orig_folder_path, channel_pattern, input_is_zarr_filenames)
             metadata['elapsed_sec'] = elapsed_sec
             for i in range(num_images_per_dataset):
-                script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, curr_channel, output_folder,
+                script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled,
+                                                              curr_channel, output_folder,
                                                               (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
-                                                              elapsed_sec, orig_folder_path, log_dir)
+                                                              elapsed_sec, orig_folder_path, output_zarr_version, log_dir)
                 key = f'Folder: {folder_path} Timepoint: {i} Channel: {channel_pattern}'
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,
@@ -332,7 +365,8 @@ if __name__ == '__main__':
                     metadata['training_images'][zarr_channel_pattern]['channelPatterns'] = {}
                 if not metadata['training_images'][zarr_channel_pattern]['channelPatterns'].get(orig_channel_pattern):
                     metadata['training_images'][zarr_channel_pattern]['channelPatterns'][orig_channel_pattern] = {}
-                metadata['training_images'][zarr_channel_pattern]['channelPatterns'][orig_channel_pattern][i] = metadata_filenames
+                metadata['training_images'][zarr_channel_pattern]['channelPatterns'][orig_channel_pattern][
+                    i] = metadata_filenames
                 if not metadata['training_images'][zarr_channel_pattern].get('chunk_names'):
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'] = {}
                 for j in range(num_chunks_per_image):
@@ -373,7 +407,6 @@ if __name__ == '__main__':
                         print(f"Error reading {file_path}: {e}")
     print(f'All occupancy ratios collected in {time.time() - occ_ratios_time} seconds!')
 
-
     # Matlab support ratio processing
     if not ignore_support_ratio:
         support_ratio_jobs = {}
@@ -404,16 +437,17 @@ if __name__ == '__main__':
                         chunk_name_dict['moment_OTF_embedding_norm'] = 0
                         chunk_name_dict['integratedPhotons'] = 0
                         continue
-                    matlab_func_str += create_matlab_func(training_image, datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
-                                                         chunk_i, timepoint_i, channel_i)
+                    matlab_func_str += create_matlab_func(training_image,
+                                                          datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
+                                                          chunk_i, timepoint_i, channel_i)
                     curr_matlab_func += 1
                     if curr_matlab_func == matlab_batch_size:
                         script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
                         key = f'{training_image},{chunk_i},{channel_i}'
                         support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                              stdout=subprocess.PIPE,
-                                                              stderr=subprocess.PIPE)
+                                                             stdout=subprocess.PIPE,
+                                                             stderr=subprocess.PIPE)
 
                         support_ratio_job.stdin.write(script)
                         support_ratio_job.stdin.close()
@@ -431,7 +465,6 @@ if __name__ == '__main__':
                 support_ratio_job.stdin.write(script)
                 support_ratio_job.stdin.close()
                 support_ratio_jobs[key] = support_ratio_job
-
 
         print('Waiting for Support Ratio jobs to finish')
         while support_ratio_jobs:
