@@ -62,8 +62,8 @@ def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
     return zarr_spec
 
 
-def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i):
-    return f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{sys.executable}\');'
+def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i, output_zarr_version):
+    return f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{output_zarr_version}\',\'{sys.executable}\');'
 
 
 def create_sbatch_matlab_script(matlab_func_str, log_dir=''):
@@ -370,7 +370,10 @@ if __name__ == '__main__':
                 if not metadata['training_images'][zarr_channel_pattern].get('chunk_names'):
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'] = {}
                 for j in range(num_chunks_per_image):
-                    filename = f'{j}.{i}.0.0.0.{curr_channel}'
+                    if output_zarr_version == 'zarr3':
+                        filename = f'c/{j}/{i}/0/0/0/{curr_channel}'
+                    else:
+                        filename = f'{j}.{i}.0.0.0.{curr_channel}'
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
                 curr_training_image_num += num_chunks_per_image
@@ -414,13 +417,20 @@ if __name__ == '__main__':
         training_image = ''
         chunk_i = '0'
         channel_i = 0
+        if output_zarr_version == 'zarr3':
+            delimiter = '/'
+        else:
+            delimiter = '.'
         for folder_path, dataset in datasets.items():
             curr_matlab_func = 0
             matlab_func_str = ''
             for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
                 training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
                 for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
-                    split_chunk_name = chunk_name.split('.')
+                    if output_zarr_version == 'zarr3':
+                        split_chunk_name = chunk_name.split(delimiter)[1:]
+                    else:
+                        split_chunk_name = chunk_name.split(delimiter)
                     chunk_i = split_chunk_name[0]
                     timepoint_i = split_chunk_name[1]
                     channel_i = int(split_chunk_name[5])
@@ -439,7 +449,7 @@ if __name__ == '__main__':
                         continue
                     matlab_func_str += create_matlab_func(training_image,
                                                           datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
-                                                          chunk_i, timepoint_i, channel_i)
+                                                          chunk_i, timepoint_i, channel_i, output_zarr_version)
                     curr_matlab_func += 1
                     if curr_matlab_func == matlab_batch_size:
                         script = create_sbatch_matlab_script(matlab_func_str, log_dir)

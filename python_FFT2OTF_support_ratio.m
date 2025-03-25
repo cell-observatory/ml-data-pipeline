@@ -1,10 +1,12 @@
-function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, chunk_i, timepoint_i, channel_i, python_path, varargin)
-    volume = ts_read_zarr(fn, chunk_i, timepoint_i, channel_i, python_path);
+function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, chunk_i, timepoint_i, channel_i, output_zarr_version, python_path, varargin)
+    fprintf('Processing file: %s with PSF: %s\nChunk: %d Timepoint: %d Channel: %d\n',fn,fn_psf_ideal,chunk_i,timepoint_i,channel_i);
+    volume = ts_read_zarr(fn, chunk_i, timepoint_i, channel_i, output_zarr_version, python_path);
     psf = tiffreadVolume(fn_psf_ideal);
     numTimepoints = size(volume, 1);
     support_ratio_avg = struct();
     fields = {};
     for i = 1 : numTimepoints
+        fprintf('Processing Timepoint: %d\n',i-1);
         support_ratio = python_FFT2OTF_support_ratio_func(squeeze(volume(i, :, :, :)), psf, varargin{:});
         if i ==1
             fields = fieldnames(support_ratio);
@@ -22,7 +24,7 @@ function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, chunk_i, timepoint_i, ch
         support_ratio_avg.(fields{f}) = support_ratio_avg.(fields{f}) / numTimepoints;
     end
 
-    create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio_avg);
+    create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio_avg, output_zarr_version);
 
 end
 
@@ -172,10 +174,14 @@ return;
 
 end
 
-function create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio_avg)
+function create_json_file(fn, chunk_i, timepoint_i, channel_i, support_ratio_avg, output_zarr_version)
     filename = [fn(1:end-5) '_c' num2str(chunk_i) '_t' num2str(timepoint_i) '_ch' num2str(channel_i) '.json'];
     json_data = containers.Map();
-    json_key = [num2str(chunk_i) '.' num2str(timepoint_i) '.0.0.0.' num2str(channel_i)];
+    if output_zarr_version == "zarr3"
+        json_key = ['c/' num2str(chunk_i) '/' num2str(timepoint_i) '/0/0/0/' num2str(channel_i)];
+    else
+        json_key = [num2str(chunk_i) '.' num2str(timepoint_i) '.0.0.0.' num2str(channel_i)];
+    end
     json_data(json_key) = support_ratio_avg;
     modifiedJsonText = jsonencode(json_data);
     fid = fopen(filename, 'w');

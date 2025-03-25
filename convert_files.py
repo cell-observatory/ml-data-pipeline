@@ -143,7 +143,11 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     occ_ratio_json = {}
     curr_mean = 0
     for i in range(num_bboxes):
-        occ_ratio_json[f'{i}.{timepoint_i}.0.0.0.{channel_num}'] = float(occ_ratio_means[curr_mean])
+        if output_zarr_version == 'zarr3':
+            filename = f'c/{i}/{timepoint_i}/0/0/0/{channel_num}'
+        else:
+            filename = f'{i}.{timepoint_i}.0.0.0.{channel_num}'
+        occ_ratio_json[filename] = float(occ_ratio_means[curr_mean])
         curr_mean += 1
     metadata_object = json.dumps(occ_ratio_json, indent=4)
     with open(
