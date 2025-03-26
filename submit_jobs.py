@@ -62,8 +62,9 @@ def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
     return zarr_spec
 
 
-def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i, output_zarr_version):
-    return f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},\'{output_zarr_version}\',\'{sys.executable}\');'
+def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i, output_zarr_version, xyPixelSize, dz):
+    return (f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},'
+            f'\'{output_zarr_version}\',\'{sys.executable}\',\'xyPixelSize\',{xyPixelSize},\'dz\',{dz});')
 
 
 def create_sbatch_matlab_script(matlab_func_str, log_dir=''):
@@ -231,13 +232,15 @@ if __name__ == '__main__':
                 decon_dsr_job_start_times[key] = time.time()
                 decon_dsr_jobs[key] = decon_dsr_job
     if run_decon_dsr:
+        running_decon_dsr_jobs = set(decon_dsr_jobs.keys())
         print('Waiting for Decon/DSR jobs to finish')
-        while decon_dsr_jobs:
-            for key, decon_dsr_job in decon_dsr_jobs.copy().items():
-                if decon_dsr_job.poll() is not None:
+        while running_decon_dsr_jobs:
+            running_decon_dsr_jobs_copy = copy.deepcopy(running_decon_dsr_jobs)
+            for key in running_decon_dsr_jobs_copy:
+                if decon_dsr_jobs[key].poll() is not None:
                     decon_dsr_job_times[key] = time.time() - decon_dsr_job_start_times[key]
                     print(f'Job for {key} Finished!')
-                    del decon_dsr_jobs[key]
+                    running_decon_dsr_jobs.discard(key)
             time.sleep(1)
         print(f'All Decon/DSR jobs finished in {time.time() - decon_dsr_time} seconds!')
 
@@ -382,11 +385,13 @@ if __name__ == '__main__':
         datasets[orig_folder_path]['num_training_images'] = curr_training_image_num
 
     print('Waiting for Training image creation jobs to finish')
-    while training_image_jobs:
-        for key, training_image_job in training_image_jobs.copy().items():
-            if training_image_job.poll() is not None:
+    running_training_image_jobs = set(training_image_jobs.keys())
+    while running_training_image_jobs:
+        running_training_image_jobs_copy = copy.deepcopy(running_training_image_jobs)
+        for key in running_training_image_jobs_copy:
+            if training_image_jobs[key].poll() is not None:
                 print(f'Job for {key} Finished!')
-                del training_image_jobs[key]
+                running_training_image_jobs.discard(key)
         time.sleep(1)
     print(f'All Training image creation jobs finished in {time.time() - training_image_time} seconds!')
 
@@ -447,9 +452,14 @@ if __name__ == '__main__':
                         chunk_name_dict['moment_OTF_embedding_norm'] = 0
                         chunk_name_dict['integratedPhotons'] = 0
                         continue
+                    psf_full_path = datasets[folder_path]['metadata']['psfFullpaths'][channel_i]
+                    if datasets[folder_path]['metadata'].get('dsr'):
+                        psf_full_path = os.path.join(os.path.dirname(psf_full_path), "DSR", os.path.basename(psf_full_path))
                     matlab_func_str += create_matlab_func(training_image,
-                                                          datasets[folder_path]['metadata']['psfFullpaths'][channel_i],
-                                                          chunk_i, timepoint_i, channel_i, output_zarr_version)
+                                                          psf_full_path,
+                                                          chunk_i, timepoint_i, channel_i, output_zarr_version,
+                                                          datasets[folder_path]['metadata']['xyPixelSize'],
+                                                          datasets[folder_path]['metadata']['dz'])
                     curr_matlab_func += 1
                     if curr_matlab_func == matlab_batch_size:
                         script = create_sbatch_matlab_script(matlab_func_str, log_dir)
@@ -477,11 +487,12 @@ if __name__ == '__main__':
                 support_ratio_jobs[key] = support_ratio_job
 
         print('Waiting for Support Ratio jobs to finish')
-        while support_ratio_jobs:
-            for key, support_ratio_job in support_ratio_jobs.copy().items():
-                if support_ratio_job.poll() is not None:
-                    #print(f'Job for {key} Finished!')
-                    del support_ratio_jobs[key]
+        running_support_ratio_jobs = set(support_ratio_jobs.keys())
+        while running_support_ratio_jobs:
+            running_support_ratio_jobs_copy = copy.deepcopy(running_support_ratio_jobs)
+            for key in running_support_ratio_jobs_copy:
+                if support_ratio_jobs[key].poll() is not None:
+                    running_support_ratio_jobs.discard(key)
             time.sleep(1)
         print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
 

@@ -1,4 +1,4 @@
-function [abs_OTF_c, OTF_mask] = GU_OTF_FFT_segmentation(psf, alpha, skewed, varargin)
+function [abs_OTF_c, OTF_mask] = GU_OTF_FFT_segmentation(psf, skewed, varargin)
 % generate OTF masked wiener back projector
 %
 % Author: Xiongtao Ruan (11/10/2022)
@@ -7,13 +7,12 @@ function [abs_OTF_c, OTF_mask] = GU_OTF_FFT_segmentation(psf, alpha, skewed, var
 ip = inputParser;
 ip.CaseSensitive = false;
 ip.addRequired('psf'); 
-ip.addRequired('alpha'); 
 ip.addRequired('skewed'); 
 ip.addParameter('OTFCumThresh', 0.9, @isnumeric);
 ip.addParameter('OTFAreaThresh', 100, @isnumeric);
 ip.addParameter('minIntThrsh', 1e-3, @(x) isnumeric(x));
 
-ip.parse(psf, alpha, skewed, varargin{:});
+ip.parse(psf, skewed, varargin{:});
 
 pr = ip.Results;
 otf_thresh = pr.OTFCumThresh;
@@ -51,7 +50,7 @@ end
 % for skewed space data, the OTF mask has three main componets, need to
 % concatenate them along z. 
 % first automatically decide if the OTF is in skewed space
-if ~false && isempty(skewed)
+if isempty(skewed)
     skewed = false;
     OTF_mask_xz = squeeze(sum(OTF_mask, 1)) > 0;
     CC = bwconncomp(OTF_mask_xz);
