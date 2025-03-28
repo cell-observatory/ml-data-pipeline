@@ -247,17 +247,21 @@ if __name__ == '__main__':
     training_image_jobs = {}
     folders_to_delete = []
     elapsed_sec = 0
-    curr_training_image_num = 0
-    zarr_channel_patterns = {}
     training_image_time = time.time()
     for folder_path, dataset in datasets.items():
+        curr_training_image_num = 0
+        zarr_channel_patterns = {}
         ext = 'tif'
         if dataset.get('input_is_zarr'):
             ext = 'zarr'
         orig_folder_path = folder_path
         metadata = dataset.copy()
         metadata['input_folder'] = orig_folder_path
-        metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, os.path.basename(orig_folder_path)))
+        folder_3 = os.path.basename(orig_folder_path)
+        folder_2 = os.path.basename(os.path.dirname(orig_folder_path))
+        folder_1 = os.path.basename(os.path.dirname(os.path.dirname(orig_folder_path)))
+        # Combine them into a path-like string
+        metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, folder_1, folder_2, folder_3))
         metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
         metadata['training_images'] = {}
         if dataset.get('decon'):
@@ -333,10 +337,10 @@ if __name__ == '__main__':
                 zarr_channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
             if not zarr_channel_pattern in zarr_channel_patterns:
                 zarr_channel_patterns[zarr_channel_pattern] = True
-                zarr_out_folder = str(
-                    os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
+                #zarr_out_folder = str(
+                #    os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
                 zarr_spec = create_zarr_spec(output_zarr_version,
-                                             os.path.join(os.path.normpath(zarr_out_folder), zarr_channel_pattern),
+                                             os.path.join(os.path.normpath(metadata['output_folder']), zarr_channel_pattern),
                                              curr_data_shape, curr_chunk_shape)
                 ts.open(zarr_spec).result()
 

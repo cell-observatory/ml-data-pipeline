@@ -128,7 +128,10 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     data = np.moveaxis(data, -1, 0)
     data = data[..., np.newaxis]
     # Create the Zarr file for the dataset
-    out_folder = str(os.path.join(out_folder, *date, os.path.basename(dataset['input_folder'])))
+    folder_3 = os.path.basename(dataset['input_folder'])
+    folder_2 = os.path.basename(os.path.dirname(dataset['input_folder']))
+    folder_1 = os.path.basename(os.path.dirname(os.path.dirname(dataset['input_folder'])))
+    out_folder = str(os.path.join(out_folder, *date, folder_1, folder_2, folder_3))
     zarr_spec = {
         'driver': output_zarr_version,
         'kvstore': {
