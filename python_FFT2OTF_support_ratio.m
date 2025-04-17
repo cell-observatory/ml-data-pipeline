@@ -1,6 +1,6 @@
-function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, chunk_i, timepoint_i, channel_i, output_zarr_version, python_path, varargin)
+function python_FFT2OTF_support_ratio(fn, fn_psf_ideal, chunk_i, timepoint_i, channel_i, output_zarr_version, varargin)
     fprintf('Processing file: %s with PSF: %s\nChunk: %d Timepoint: %d Channel: %d\n',fn,fn_psf_ideal,chunk_i,timepoint_i,channel_i);
-    volume = ts_read_zarr(fn, chunk_i, timepoint_i, channel_i, output_zarr_version, python_path);
+    volume = ts_read_zarr(fn, chunk_i, timepoint_i, channel_i, output_zarr_version);
     psf = tiffreadVolume(fn_psf_ideal);
     numTimepoints = size(volume, 1);
     support_ratio_avg = struct();

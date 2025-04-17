@@ -12,7 +12,7 @@ def ts_read_matlab(file_path, chunk_i, timepoint_i, channel_i, output_zarr_versi
         }
     }).result()
 
-    num_timepoints = im_ts.chunk_layout.write_chunk.shape[1]
+    num_timepoints = im_ts.chunk_layout.read_chunk.shape[1]
     array_data = im_ts[chunk_i, timepoint_i*num_timepoints:(timepoint_i*num_timepoints)+num_timepoints, :, :, :, channel_i].read().result()
     # permute to yxz for Matlab
     array_data = np.transpose(array_data, (0, 2, 3, 1))

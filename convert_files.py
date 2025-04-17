@@ -142,16 +142,19 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     zarr_file = ts.open(zarr_spec).result()
     zarr_file[:, timepoint_i*batch_size:(timepoint_i + 1)*batch_size, :, :, :, channel_num:channel_num + 1] = data
 
-    occ_ratio_means = np.mean(occ_ratios, axis=0)
+    #occ_ratio_means = np.mean(occ_ratios, axis=0)
     occ_ratio_json = {}
-    curr_mean = 0
-    for i in range(num_bboxes):
-        if output_zarr_version == 'zarr3':
-            filename = f'c/{i}/{timepoint_i}/0/0/0/{channel_num}'
-        else:
-            filename = f'{i}.{timepoint_i}.0.0.0.{channel_num}'
-        occ_ratio_json[filename] = float(occ_ratio_means[curr_mean])
-        curr_mean += 1
+    #curr_mean = 0
+    occ_ratios_i = 0
+    for i in range((timepoint_i * batch_size), ((timepoint_i + 1) * batch_size)):
+        for j in range(num_bboxes):
+            if output_zarr_version == 'zarr3':
+                filename = f'c/{j}/{i}/0/0/0/{channel_num}'
+            else:
+                filename = f'{j}.{i}.0.0.0.{channel_num}'
+            occ_ratio_json[filename] = float(occ_ratios[occ_ratios_i][j])
+        occ_ratios_i += 1
+        #curr_mean += 1
     metadata_object = json.dumps(occ_ratio_json, indent=4)
     with open(
             f'{os.path.normpath(os.path.join(os.path.normpath(out_folder), channel_pattern))}_{out_name}img_{timepoint_i}t_{channel_num}ch.json',

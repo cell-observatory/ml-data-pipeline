@@ -23,6 +23,7 @@ from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
     if zarr_version == 'zarr3':
+        shard_shape = [1, 16, data_shape[2], data_shape[3], data_shape[4], 1]
         zarr_spec = {
             'driver': zarr_version,
             'kvstore': {
@@ -32,10 +33,18 @@ def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
             'metadata': {
                 'data_type': 'uint16',
                 'shape': data_shape,
-                'chunk_grid': {'name': 'regular', 'configuration': {'chunk_shape': chunk_shape}},
-                'codecs': [{"name": "bytes", "configuration": {"endian": "little"}},
-                           {'name': 'blosc',
-                            'configuration': {'cname': 'zstd', 'clevel': 1, 'blocksize': 0, 'shuffle': 'shuffle'}}],
+                'chunk_grid': {'name': 'regular', 'configuration': {'chunk_shape': shard_shape}},
+                'codecs': [{
+                    "name": "sharding_indexed",
+                    "configuration": {
+                        "chunk_shape": chunk_shape,
+                        "codecs": [{"name": "bytes", "configuration": {"endian": "little"}},
+                                   {"name": "blosc", "configuration": {
+                                       "cname": "zstd", "clevel": 1, "blocksize": 0, "shuffle": "shuffle"}}],
+                        "index_codecs": [{"name": "bytes", "configuration": {"endian": "little"}}, {"name": "crc32c"}],
+                        "index_location": "end"
+                    }
+                }],
                 'fill_value': 0,
             },
             'create': True,
@@ -64,7 +73,7 @@ def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
 
 def create_matlab_func(fn, fn_psf, chunk_i, timepoint_i, channel_i, output_zarr_version, xyPixelSize, dz):
     return (f'python_FFT2OTF_support_ratio(\'{fn}\',\'{fn_psf}\',{chunk_i},{timepoint_i},{channel_i},'
-            f'\'{output_zarr_version}\',\'{sys.executable}\',\'xyPixelSize\',{xyPixelSize},\'dz\',{dz});')
+            f'\'{output_zarr_version}\',\'xyPixelSize\',{xyPixelSize},\'dz\',{dz});')
 
 
 def create_sbatch_matlab_script(matlab_func_str, log_dir=''):
@@ -77,7 +86,7 @@ def create_sbatch_matlab_script(matlab_func_str, log_dir=''):
 #SBATCH --cpus-per-task={cpus_per_task}
 #SBATCH --mem-per-cpu=21000
 #SBATCH --output={log_dir}/%j.out
-cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch "{matlab_func_str}exit;"
+cd {os.path.dirname(os.path.abspath(__file__))};matlab -batch "pyenv('Version','{sys.executable}');{matlab_func_str}exit;"
 '''
 
 
@@ -165,7 +174,7 @@ if __name__ == '__main__':
     ap.add_argument('--cpu-config-file', type=str, default='',
                     help="Path to the CPU config file")
     ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[128, 128, 128],
-                    help="Comma separated date Year,Month,Day")
+                    help="data shape for the 3D Cube")
     ap.add_argument('--num-timepoints-per-image', type=int, default=16,
                     help="Number of timepoints in a training image")
     ap.add_argument('--matlab-batch-size', type=int, default=2,
@@ -179,6 +188,7 @@ if __name__ == '__main__':
     log_dir = args.log_dir
     cpu_config_file = args.cpu_config_file
     data_shape = args.data_shape
+    inner_chunk_shape = [1, 32, 32, 32]
     batch_size = args.num_timepoints_per_image
     matlab_batch_size = args.matlab_batch_size
     ignore_support_ratio = args.ignore_support_ratio
@@ -303,7 +313,7 @@ if __name__ == '__main__':
         orig_channel_patterns = {}
         zarr_channel_pattern = ''
         curr_data_shape = copy.deepcopy(data_shape)
-        curr_chunk_shape = copy.deepcopy(data_shape)
+        curr_chunk_shape = copy.deepcopy(inner_chunk_shape)
         curr_data_shape.insert(0, 1)
         curr_data_shape.append(num_orig_patterns)
         curr_chunk_shape.insert(0, 1)
@@ -376,13 +386,14 @@ if __name__ == '__main__':
                     i] = metadata_filenames
                 if not metadata['training_images'][zarr_channel_pattern].get('chunk_names'):
                     metadata['training_images'][zarr_channel_pattern]['chunk_names'] = {}
-                for j in range(num_chunks_per_image):
-                    if output_zarr_version == 'zarr3':
-                        filename = f'c/{j}/{i}/0/0/0/{curr_channel}'
-                    else:
-                        filename = f'{j}.{i}.0.0.0.{curr_channel}'
-                    metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
-                    metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
+                for chunk_i in range(i * batch_size, (i * batch_size) + batch_size):
+                    for j in range(num_chunks_per_image):
+                        if output_zarr_version == 'zarr3':
+                            filename = f'c/{j}/{chunk_i}/0/0/0/{curr_channel}'
+                        else:
+                            filename = f'{j}.{chunk_i}.0.0.0.{curr_channel}'
+                        metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
+                        metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
                 curr_training_image_num += num_chunks_per_image
                 datasets[orig_folder_path]['num_chunks_per_image'] = num_chunks_per_image
         datasets[orig_folder_path]['metadata'] = metadata
