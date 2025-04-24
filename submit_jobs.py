@@ -94,7 +94,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          output_folder='',
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
-                         log_dir='', decon=False, dsr=False, output_zarr_version='zarr3'):
+                         log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None, output_zarr_version='zarr3'):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
@@ -114,6 +114,8 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += '--decon '
         if dsr:
             extra_params += '--dsr '
+        if background_path:
+            extra_params += f'--background-paths {background_path} --flatfield-paths {flatfield_path} '
     return f'''#!/bin/sh
 #SBATCH --qos=abc_high
 #SBATCH --partition=abc
@@ -140,13 +142,18 @@ def create_file_conversion_sbatch_script(input_file, folder_path, channel_patter
                                 log_dir=log_dir)
 
 
-def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, log_dir):
+def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, background_path, flatfield_path, log_dir):
     if decon is None:
         decon = False
     if dsr is None:
         dsr = False
     return create_sbatch_script('decon_dsr.py', input_file, folder_path, channel_pattern, decon=decon, dsr=dsr,
-                                log_dir=log_dir)
+                                background_path=background_path, flatfield_path=flatfield_path, log_dir=log_dir)
+
+
+def get_cycle_ms_from_json(file_path):
+    with open(file_path) as f:
+        return json.load(f)['Camera']['Actual']['Cycle (ms)']
 
 
 class Dataset:
@@ -179,9 +186,12 @@ if __name__ == '__main__':
                     help="Number of timepoints in a training image")
     ap.add_argument('--matlab-batch-size', type=int, default=2,
                     help="How many Matlab function calls to run in a Matlab session")
-    ap.add_argument("--ignore-support-ratio", action="store_true", help="Do not run the support ratio processing")
+    ap.add_argument("--add-support-ratio-metadata", action="store_true", help="Run the support ratio processing")
     ap.add_argument('--output-zarr-version', type=str, default='zarr3',
                     help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
+    ap.add_argument('--background-folder', type=str,
+                    default='/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/averaged',
+                    help="Path to the folder containing the background files")
     args = ap.parse_args()
     input_file = args.input_file
     output_folder = args.output_folder
@@ -191,8 +201,9 @@ if __name__ == '__main__':
     inner_chunk_shape = [1, 32, 32, 32]
     batch_size = args.num_timepoints_per_image
     matlab_batch_size = args.matlab_batch_size
-    ignore_support_ratio = args.ignore_support_ratio
+    add_support_ratio_metadata = args.add_support_ratio_metadata
     output_zarr_version = args.output_zarr_version
+    background_folder = args.background_folder
     data_shape.insert(0, batch_size)
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
     run_decon_dsr = False
@@ -229,8 +240,23 @@ if __name__ == '__main__':
                     raise SystemExit(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
                                      f'Found {file_count} files and the batch size is {batch_size}.')
                 datasets[folder_path]['input_is_zarr'] = True
+                background_path = None
+                flatfield_path = None
+                # Set the background paths if they are not set already
+                if 'BKRemoval' in dataset and ('backgroundPaths' not in dataset or not dataset['backgroundPaths']):
+                    flatfield_path = '/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif'
+                    first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
+                    cycle_ms = get_cycle_ms_from_json(first_json)
+                    background_cycle_ms_file_list = glob.glob(f'{background_folder}/*{channel_pattern}*.json')
+                    background_cycle_ms_diff_list = []
+                    for file in background_cycle_ms_file_list:
+                        background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file)-cycle_ms))
+                    background_path_json = background_cycle_ms_file_list[background_cycle_ms_diff_list.index(min(background_cycle_ms_diff_list))]
+                    cycle_ms_pattern = os.path.basename(background_path_json).replace('_JSONsettings.json','')
+                    background_path = glob.glob(f'{background_folder}/*{cycle_ms_pattern}*.tif')[0]
+
                 script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dataset.get('decon'),
-                                                        dataset.get('dsr'),
+                                                        dataset.get('dsr'), background_path, flatfield_path,
                                                         log_dir)
                 key = f'Folder: {folder_path} Channel: {channel_pattern}'
                 decon_dsr_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
@@ -350,7 +376,8 @@ if __name__ == '__main__':
                 #zarr_out_folder = str(
                 #    os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
                 zarr_spec = create_zarr_spec(output_zarr_version,
-                                             os.path.join(os.path.normpath(metadata['output_folder']), zarr_channel_pattern),
+                                             os.path.join(os.path.normpath(metadata['output_folder']),
+                                                          zarr_channel_pattern),
                                              curr_data_shape, curr_chunk_shape)
                 ts.open(zarr_spec).result()
 
@@ -365,7 +392,8 @@ if __name__ == '__main__':
                                                               curr_channel, output_folder,
                                                               (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
-                                                              elapsed_sec, orig_folder_path, output_zarr_version, log_dir)
+                                                              elapsed_sec, orig_folder_path, output_zarr_version,
+                                                              log_dir)
                 key = f'Folder: {folder_path} Timepoint: {i} Channel: {channel_pattern}'
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,
@@ -431,7 +459,7 @@ if __name__ == '__main__':
     print(f'All occupancy ratios collected in {time.time() - occ_ratios_time} seconds!')
 
     # Matlab support ratio processing
-    if not ignore_support_ratio:
+    if add_support_ratio_metadata:
         support_ratio_jobs = {}
         support_ratio_time = time.time()
         training_image = ''
@@ -469,7 +497,8 @@ if __name__ == '__main__':
                         continue
                     psf_full_path = datasets[folder_path]['metadata']['psfFullpaths'][channel_i]
                     if datasets[folder_path]['metadata'].get('dsr'):
-                        psf_full_path = os.path.join(os.path.dirname(psf_full_path), "DSR", os.path.basename(psf_full_path))
+                        psf_full_path = os.path.join(os.path.dirname(psf_full_path), "DSR",
+                                                     os.path.basename(psf_full_path))
                     matlab_func_str += create_matlab_func(training_image,
                                                           psf_full_path,
                                                           chunk_i, timepoint_i, channel_i, output_zarr_version,
@@ -511,7 +540,7 @@ if __name__ == '__main__':
             time.sleep(1)
         print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
 
-        # Get occ ratios
+        # Get support ratios
         print('Collecting Support Ratio metadata')
         support_ratio_metadata_time = time.time()
         for folder_path, dataset in datasets.items():

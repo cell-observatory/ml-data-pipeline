@@ -129,10 +129,16 @@ if __name__ == '__main__':
                     help="Channel patterns separated by comma")
     ap.add_argument("--decon", action="store_true", help="Run decon")
     ap.add_argument("--dsr", action="store_true", help="Run dsr")
+    ap.add_argument('--background-paths', type=lambda s: list(map(str, s.split(','))), default=None,
+                    help="Paths to the background files separated by comma")
+    ap.add_argument('--flatfield-paths', type=lambda s: list(map(str, s.split(','))), default=None,
+                    help="Paths to the  separated by comma")
     args = ap.parse_args()
     input_file = args.input_file
     folder_paths = args.folder_paths
     channel_patterns = args.channel_patterns
+    background_paths = args.background_paths
+    flatfield_paths = args.flatfield_paths
     decon = args.decon
     dsr = args.dsr
 
@@ -175,6 +181,10 @@ if __name__ == '__main__':
                     kwargs[param] = value
             kwargs['channelPatterns'] = channel_patterns
             kwargs['saveZarr'] = True
+            if background_paths:
+                kwargs['FFCorrection'] = True
+                kwargs['FFImagePaths'] = flatfield_paths
+                kwargs['backgroundPaths'] = background_paths
             if decon:
                 kwargs['zarrFile'] = True
                 if 'resultDirName' in dataset:
