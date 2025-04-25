@@ -182,7 +182,6 @@ if __name__ == '__main__':
             kwargs['channelPatterns'] = channel_patterns
             kwargs['saveZarr'] = True
             if background_paths:
-                kwargs['FFCorrection'] = True
                 kwargs['FFImagePaths'] = flatfield_paths
                 kwargs['backgroundPaths'] = background_paths
             if decon:

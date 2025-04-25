@@ -244,7 +244,7 @@ if __name__ == '__main__':
                 background_path = None
                 flatfield_path = None
                 # Set the background paths if they are not set already
-                if 'BKRemoval' in dataset and ('backgroundPaths' not in dataset or not dataset['backgroundPaths']):
+                if 'FFCorrection' in dataset and ('backgroundPaths' not in dataset or not dataset['backgroundPaths']):
                     flatfield_path = '/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif'
                     first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
                     cycle_ms = get_cycle_ms_from_json(first_json)
