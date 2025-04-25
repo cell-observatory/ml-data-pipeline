@@ -108,6 +108,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
         if orig_folder_path:
             extra_params += f'--orig-folder-paths {orig_folder_path} '
     elif python_script_name == 'decon_dsr.py':
+        cpus_per_task = 8
         if input_file:
             extra_params += f'--input-file {input_file} '
         if decon:
@@ -301,13 +302,13 @@ if __name__ == '__main__':
         metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
         metadata['training_images'] = {}
         if dataset.get('decon'):
-            if 'resultDirName' in dataset:
+            if 'resultDirName' in dataset and dataset['resultDirName']:
                 folder_path = os.path.join(folder_path, dataset['resultDirName'])
             else:
                 folder_path = os.path.join(folder_path, 'matlab_decon')
             folders_to_delete.append(folder_path)
         if dataset.get('dsr'):
-            if 'DSRDirName' in dataset:
+            if 'DSRDirName' in dataset and dataset['DSRDirName']:
                 folder_path = os.path.join(folder_path, dataset['DSRDirName'])
             else:
                 folder_path = os.path.join(folder_path, 'DSR')
@@ -560,12 +561,16 @@ if __name__ == '__main__':
                             print(f"Error reading {file_path}: {e}")
         print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')
 
+    # Write out the metadata
+    print('Writing out the metadata')
+    metadata_write_time = time.time()
     for folder_path, dataset in datasets.items():
         metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
         with open(
                 f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
                 'w') as outfile:
             outfile.write(metadata_object)
+    print(f'All metadata writton out in {time.time() - metadata_write_time} seconds!')
 
     if folders_to_delete:
         print('Cleaning up intermediate results')
