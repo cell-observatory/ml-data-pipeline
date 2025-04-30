@@ -21,9 +21,9 @@ from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 
-def create_zarr_spec(zarr_version, path, data_shape, chunk_shape):
+def create_zarr_spec(zarr_version, path, data_shape, chunk_shape, num_timepoints_per_image):
     if zarr_version == 'zarr3':
-        shard_shape = [1, 16, data_shape[2], data_shape[3], data_shape[4], 1]
+        shard_shape = [1, num_timepoints_per_image, data_shape[2], data_shape[3], data_shape[4], 1]
         zarr_spec = {
             'driver': zarr_version,
             'kvstore': {
@@ -248,7 +248,8 @@ if __name__ == '__main__':
                     flatfield_path = '/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif'
                     first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
                     cycle_ms = get_cycle_ms_from_json(first_json)
-                    background_cycle_ms_file_list = glob.glob(f'{background_folder}/*{channel_pattern}*.json')
+                    background_channel_pattern = re.search(r'Cam[A-Z]', channel_pattern).group(0)
+                    background_cycle_ms_file_list = glob.glob(f'{background_folder}/*{background_channel_pattern}*.json')
                     background_cycle_ms_diff_list = []
                     for file in background_cycle_ms_file_list:
                         background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file)-cycle_ms))
@@ -379,7 +380,7 @@ if __name__ == '__main__':
                 zarr_spec = create_zarr_spec(output_zarr_version,
                                              os.path.join(os.path.normpath(metadata['output_folder']),
                                                           zarr_channel_pattern),
-                                             curr_data_shape, curr_chunk_shape)
+                                             curr_data_shape, curr_chunk_shape, batch_size)
                 ts.open(zarr_spec).result()
 
             batch_start_number = 0
