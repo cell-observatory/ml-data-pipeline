@@ -43,7 +43,8 @@ def add_metadata_to_db(metadata_file, url, key):
             prepared_cubes_entry_copy['y'] = curr_chunk_list[3]
             prepared_cubes_entry_copy['x'] = curr_chunk_list[4]
             prepared_cubes_entry_copy['channel'] = curr_chunk_list[5]
-            prepared_cubes_entry_copy['occupancy_ratio'] = chunk_metadata['occ_ratio']
+            prepared_cubes_entry_copy['occupancy_ratio'] = chunk_metadata.pop('occ_ratio')
+            prepared_cubes_entry_copy['metadata_json'] = chunk_metadata
             prepared_cubes_entry_list.append(prepared_cubes_entry_copy)
     response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list).execute()
     return response
