@@ -66,7 +66,7 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
 
 def process_image(args):
     """Function to read and process an image."""
-    index, filename, folder_path, input_is_zarr, data_shape, bboxes, num_bboxes, remove_background = args
+    index, filename, folder_path, input_is_zarr, data_shape, bboxes, num_bboxes = args
     if not input_is_zarr:
         #im = cpptiff.read_tiff(os.path.join(folder_path, filename), [0, bboxes[-1][1]])
         im = cpptiff.read_tiff(os.path.join(folder_path, filename))
@@ -84,10 +84,6 @@ def process_image(args):
         im = im_ts.read().result()
         im = np.transpose(im, (2, 0, 1))
 
-    # Remove background if needed
-    if remove_background:
-        nstddevs = 2
-        im = np.clip(im - 100 - (np.std(im) * nstddevs), 0, np.iinfo(np.uint16).max).astype(np.uint16)
     chunks = np.zeros(tuple(data_shape[-3:]) + (num_bboxes,), dtype=np.uint16, order='F')
     min_val = np.percentile(im, 0.1)
     max_val = np.percentile(im, 99.9)
@@ -106,9 +102,7 @@ def process_image(args):
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
-                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version,
-                         data_shape=None,
-                         remove_background=False):
+                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version, data_shape=None):
     if not data_shape:
         data_shape = [batch_size, 128, 128, 128]
     bboxes = get_chunk_bboxes(folder_path, filenames[0], data_shape, input_is_zarr)
@@ -117,7 +111,7 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     data = np.zeros(tuple(data_shape) + (len(bboxes),), dtype=np.uint16, order='F')
     num_files = len(filenames)
     occ_ratios = np.zeros((num_files, num_bboxes), dtype=np.float32, order='F')
-    args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, num_bboxes, remove_background) for i
+    args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, num_bboxes) for i
                  in
                  range(num_files)]
     with ProcessPoolExecutor() as executor:
