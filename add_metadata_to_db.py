@@ -3,7 +3,7 @@ import copy
 import json
 import re
 
-from supabase import create_client, Client
+from supabase import create_client
 
 
 def get_first_key(d):
@@ -57,7 +57,6 @@ def add_metadata_to_db(metadata_file, url, key):
             curr_chunk_list = re.split(delimiters, chunk_name)
             curr_chunk_list.remove('c')
             prepared_cubes_entry_copy = copy.deepcopy(prepared_cubes_entry)
-            prepared_cubes_entry_copy['chunk_name'] = chunk_name
             prepared_cubes_entry_copy['chunk'] = curr_chunk_list[0]
             prepared_cubes_entry_copy['time'] = curr_chunk_list[1]
             bbox = chunk_metadata.pop('bbox')
@@ -66,7 +65,8 @@ def add_metadata_to_db(metadata_file, url, key):
             prepared_cubes_entry_copy['x_start'] = bbox[2]
             prepared_cubes_entry_copy['channel'] = curr_chunk_list[5]
             prepared_cubes_entry_copy['occupancy_ratio'] = chunk_metadata.pop('occ_ratio')
-            prepared_cubes_entry_copy['metadata_json'] = chunk_metadata
+            if chunk_metadata:
+                prepared_cubes_entry_copy['metadata_json'] = chunk_metadata
             prepared_cubes_entry_list.append(prepared_cubes_entry_copy)
     response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list).execute()
     return response
