@@ -185,6 +185,8 @@ if __name__ == '__main__':
                     help="Preprocessing time in seconds")
     ap.add_argument('--output-zarr-version', type=str, default='zarr3',
                     help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
+    ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[16, 128, 128, 128],
+                    help="Data shape for the 4D Hypercube")
     args = ap.parse_args()
     input_file = args.input_file
     folder_paths = args.folder_paths
@@ -200,6 +202,7 @@ if __name__ == '__main__':
     date = args.date
     elapsed_sec = args.elapsed_sec
     output_zarr_version = args.output_zarr_version
+    data_shape = args.data_shape
 
     with open(input_file) as f:
         datasets_json = json.load(f)
@@ -220,7 +223,7 @@ if __name__ == '__main__':
             timepoint_i = int(batch_start_number/batch_size)
             convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
                                  output_name_start_number, batch_size, input_is_zarr, date, channel_num, timepoint_i,
-                                 output_zarr_version)
+                                 output_zarr_version, data_shape)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")

@@ -94,7 +94,8 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          output_folder='',
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
-                         log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None, output_zarr_version='zarr3'):
+                         log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None, output_zarr_version='zarr3',
+                         data_shape=None):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
@@ -107,6 +108,8 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += f'--date {",".join(map(str, date_ymd))} '
         if orig_folder_path:
             extra_params += f'--orig-folder-paths {orig_folder_path} '
+        if data_shape:
+            extra_params += f'--data-shape {data_shape[0]},{data_shape[1]},{data_shape[2]},{data_shape[3]} '
     elif python_script_name == 'decon_dsr.py':
         cpus_per_task = 8
         if input_file:
@@ -133,14 +136,14 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 
 def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, channel_num, output_folder,
                                          output_name_start_num, batch_start_number, batch_size, input_is_zarr, date_ymd,
-                                         elapsed_sec, orig_folder_path, output_zarr_version, log_dir):
+                                         elapsed_sec, orig_folder_path, output_zarr_version, data_shape, log_dir):
     return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, tiled=tiled,
                                 channel_num=channel_num, output_folder=output_folder,
                                 output_name_start_num=output_name_start_num, batch_start_number=batch_start_number,
                                 batch_size=batch_size,
                                 input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec,
                                 orig_folder_path=orig_folder_path, output_zarr_version=output_zarr_version,
-                                log_dir=log_dir)
+                                data_shape=data_shape, log_dir=log_dir)
 
 
 def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, background_path, flatfield_path, log_dir):
@@ -182,7 +185,7 @@ if __name__ == '__main__':
     ap.add_argument('--cpu-config-file', type=str, default='',
                     help="Path to the CPU config file")
     ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[128, 128, 128],
-                    help="data shape for the 3D Cube")
+                    help="Data shape for the 3D Cube")
     ap.add_argument('--num-timepoints-per-image', type=int, default=16,
                     help="Number of timepoints in a training image")
     ap.add_argument('--matlab-batch-size', type=int, default=2,
@@ -361,7 +364,7 @@ if __name__ == '__main__':
             if not num_images_per_dataset:
                 raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
                                 f'Found {file_count} files and the batch size is {batch_size}.')
-            bboxes = get_chunk_bboxes(folder_path, files[0], (batch_size, 128, 128, 128), dataset.get('input_is_zarr'))
+            bboxes = get_chunk_bboxes(folder_path, files[0], data_shape, dataset.get('input_is_zarr'))
             num_chunks_per_image = len(bboxes)
 
             if not orig_channel_pattern in orig_channel_patterns:
@@ -395,7 +398,7 @@ if __name__ == '__main__':
                                                               (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
                                                               elapsed_sec, orig_folder_path, output_zarr_version,
-                                                              log_dir)
+                                                              data_shape, log_dir)
                 key = f'Folder: {folder_path} Timepoint: {i} Channel: {channel_pattern}'
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,
