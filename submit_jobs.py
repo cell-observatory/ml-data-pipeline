@@ -12,7 +12,7 @@ from pathlib import Path
 
 import tensorstore as ts
 
-from convert_files import get_chunk_bboxes, get_filenames
+from convert_files import get_chunk_bboxes, get_image_shape, get_filenames
 import inspect
 import re
 from datetime import datetime
@@ -21,9 +21,9 @@ from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 
-def create_zarr_spec(zarr_version, path, data_shape, chunk_shape, num_timepoints_per_image):
+def create_zarr_spec(zarr_version, path, data_shape, cube_shape, chunk_shape, num_timepoints_per_image):
     if zarr_version == 'zarr3':
-        shard_shape = [1, num_timepoints_per_image, data_shape[2], data_shape[3], data_shape[4], 1]
+        shard_shape = [num_timepoints_per_image, cube_shape[0], cube_shape[1], cube_shape[2], 1]
         zarr_spec = {
             'driver': zarr_version,
             'kvstore': {
@@ -95,7 +95,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
                          log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None, output_zarr_version='zarr3',
-                         data_shape=None):
+                         outer_data_shape=None, data_shape=None):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
@@ -108,6 +108,8 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += f'--date {",".join(map(str, date_ymd))} '
         if orig_folder_path:
             extra_params += f'--orig-folder-paths {orig_folder_path} '
+        if outer_data_shape:
+            extra_params += f'--outer-data-shape {outer_data_shape[0]},{outer_data_shape[1]},{outer_data_shape[2]},{outer_data_shape[3]},{outer_data_shape[4]} '
         if data_shape:
             extra_params += f'--data-shape {data_shape[0]},{data_shape[1]},{data_shape[2]},{data_shape[3]} '
     elif python_script_name == 'decon_dsr.py':
@@ -136,14 +138,14 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 
 def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, channel_num, output_folder,
                                          output_name_start_num, batch_start_number, batch_size, input_is_zarr, date_ymd,
-                                         elapsed_sec, orig_folder_path, output_zarr_version, data_shape, log_dir):
+                                         elapsed_sec, orig_folder_path, output_zarr_version, outer_data_shape, data_shape, log_dir):
     return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, tiled=tiled,
                                 channel_num=channel_num, output_folder=output_folder,
                                 output_name_start_num=output_name_start_num, batch_start_number=batch_start_number,
                                 batch_size=batch_size,
                                 input_is_zarr=input_is_zarr, date_ymd=date_ymd, elapsed_sec=elapsed_sec,
                                 orig_folder_path=orig_folder_path, output_zarr_version=output_zarr_version,
-                                data_shape=data_shape, log_dir=log_dir)
+                                outer_data_shape=outer_data_shape, data_shape=data_shape, log_dir=log_dir)
 
 
 def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, background_path, flatfield_path, log_dir):
@@ -345,9 +347,6 @@ if __name__ == '__main__':
         zarr_channel_pattern = ''
         curr_data_shape = copy.deepcopy(data_shape)
         curr_chunk_shape = copy.deepcopy(inner_chunk_shape)
-        curr_data_shape.insert(0, 1)
-        curr_data_shape.append(num_orig_patterns)
-        curr_chunk_shape.insert(0, 1)
         curr_chunk_shape.append(1)
         for channel_pattern in dataset['channelPatterns']:
             orig_channel_pattern = copy.deepcopy(channel_pattern)
@@ -370,20 +369,32 @@ if __name__ == '__main__':
             if not orig_channel_pattern in orig_channel_patterns:
                 orig_channel_patterns[orig_channel_pattern] = True
                 curr_channel += 1
-                curr_data_shape[0] = num_chunks_per_image
-                curr_data_shape[1] = num_images_per_dataset * batch_size
+                z_min = float('inf')
+                y_min = float('inf')
+                x_min = float('inf')
+                z_max = 0
+                y_max = 0
+                x_max = 0
+                for bbox in bboxes:
+                    z_min = min(z_min, bbox[0])
+                    y_min = min(y_min, bbox[1])
+                    x_min = min(x_min, bbox[2])
+                    z_max = max(z_max, bbox[3])
+                    y_max = max(y_max, bbox[4])
+                    x_max = max(x_max, bbox[5])
+                curr_data_shape = [z_max-z_min, y_max-y_min, x_max-x_min]
+                curr_data_shape.insert(0, num_images_per_dataset * batch_size)
+                curr_data_shape.append(num_orig_patterns)
 
             zarr_channel_pattern = f'{channel_pattern}.zarr'
             if tiled:
                 zarr_channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
             if not zarr_channel_pattern in zarr_channel_patterns:
                 zarr_channel_patterns[zarr_channel_pattern] = True
-                #zarr_out_folder = str(
-                #    os.path.join(output_folder, *date_ymd, os.path.basename(metadata['input_folder'])))
                 zarr_spec = create_zarr_spec(output_zarr_version,
                                              os.path.join(os.path.normpath(metadata['output_folder']),
                                                           zarr_channel_pattern),
-                                             curr_data_shape, curr_chunk_shape, batch_size)
+                                             curr_data_shape, data_shape[1:], curr_chunk_shape, batch_size)
                 ts.open(zarr_spec).result()
 
             batch_start_number = 0
@@ -398,7 +409,7 @@ if __name__ == '__main__':
                                                               (i * num_chunks_per_image), i * batch_size,
                                                               batch_size, dataset.get('input_is_zarr'), date_ymd,
                                                               elapsed_sec, orig_folder_path, output_zarr_version,
-                                                              data_shape, log_dir)
+                                                              curr_data_shape, data_shape, log_dir)
                 key = f'Folder: {folder_path} Timepoint: {i} Channel: {channel_pattern}'
                 training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                       stdout=subprocess.PIPE,

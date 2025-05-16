@@ -33,7 +33,7 @@ def get_filenames(folder_path, channel_pattern='', input_is_zarr=False):
     return sorted_files
 
 
-def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
+def get_image_shape(folder_path, filename, input_is_zarr):
     if not input_is_zarr:
         im_shape = cpptiff.get_image_shape(os.path.join(folder_path, filename))
     else:
@@ -49,6 +49,11 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
         '''
         im_zarr = zarr.open(f'{os.path.normpath(os.path.join(folder_path, filename))}', mode="r")
         im_shape = (im_zarr.shape[2], im_zarr.shape[0], im_zarr.shape[1])
+    return im_shape
+
+
+def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
+    im_shape = get_image_shape(folder_path, filename, input_is_zarr)
 
     bboxes = []
     z = im_shape[0] % data_shape[1] // 2
@@ -66,10 +71,24 @@ def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
 
 def process_image(args):
     """Function to read and process an image."""
-    index, filename, folder_path, input_is_zarr, data_shape, bboxes, num_bboxes = args
+    index, filename, folder_path, input_is_zarr, bboxes, num_bboxes = args
+    z_min = float('inf')
+    y_min = float('inf')
+    x_min = float('inf')
+    z_max = 0
+    y_max = 0
+    x_max = 0
+    for bbox in bboxes:
+        z_min = min(z_min, bbox[0])
+        y_min = min(y_min, bbox[1])
+        x_min = min(x_min, bbox[2])
+        z_max = max(z_max, bbox[3])
+        y_max = max(y_max, bbox[4])
+        x_max = max(x_max, bbox[5])
     if not input_is_zarr:
-        #im = cpptiff.read_tiff(os.path.join(folder_path, filename), [0, bboxes[-1][1]])
-        im = cpptiff.read_tiff(os.path.join(folder_path, filename))
+        im = cpptiff.read_tiff(os.path.join(folder_path, filename), [z_min, z_max])
+        im = im[:, y_min:y_max, x_min:x_max]
+        #im = cpptiff.read_tiff(os.path.join(folder_path, filename))
     else:
         im_ts = ts.open({
             'driver': 'zarr',
@@ -80,47 +99,42 @@ def process_image(args):
         }).result()
 
         # Data is YXZ for zarr so transpose it after
-        #im = im_ts[:bboxes[-1][3], :bboxes[-1][5], :bboxes[-1][1]].read().result()
-        im = im_ts.read().result()
+        im = im_ts[y_min:y_max, x_min:x_max, z_min:z_max].read().result()
+        #im = im_ts.read().result()
         im = np.transpose(im, (2, 0, 1))
 
-    chunks = np.zeros(tuple(data_shape[-3:]) + (num_bboxes,), dtype=np.uint16, order='F')
     min_val = np.percentile(im, 0.1)
     max_val = np.percentile(im, 99.9)
     occ_ratios = np.zeros(num_bboxes, dtype=np.float32, order='F')
     for i, bbox in enumerate(bboxes):
-        chunk = im[bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5]]
+        chunk = im[bbox[0]-z_min:bbox[3]-z_min, bbox[1]-y_min:bbox[4]-y_min, bbox[2]-x_min:bbox[5]-x_min]
         within_bounds = (chunk > min_val) & (chunk < max_val)
         occ_ratios[i] = np.mean(within_bounds)
-        chunks[:, :, :, i] = chunk
 
-    '''
-    elif im.itemsize > 2:
-        im = np.clip(im, 0, np.iinfo(np.uint16).max).astype(np.uint16)
-    '''
-    return index, chunks, occ_ratios  # Return index and processed image
+    return index, im, occ_ratios  # Return index and processed image
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
-                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version, data_shape=None):
+                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version, outer_data_shape, data_shape=None):
     if not data_shape:
         data_shape = [batch_size, 128, 128, 128]
+
     bboxes = get_chunk_bboxes(folder_path, filenames[0], data_shape, input_is_zarr)
     num_bboxes = len(bboxes)
 
-    data = np.zeros(tuple(data_shape) + (len(bboxes),), dtype=np.uint16, order='F')
+    data = np.zeros((batch_size,) + tuple(outer_data_shape[1:4]), dtype=np.uint16, order='F')
     num_files = len(filenames)
     occ_ratios = np.zeros((num_files, num_bboxes), dtype=np.float32, order='F')
-    args_list = [(i, filenames[i], folder_path, input_is_zarr, data_shape, bboxes, num_bboxes) for i
+    args_list = [(i, filenames[i], folder_path, input_is_zarr, bboxes, num_bboxes) for i
                  in
                  range(num_files)]
     with ProcessPoolExecutor() as executor:
-        for i, chunks, occ_ratios_i in executor.map(process_image, args_list):
-            data[i, :, :, :, :] = chunks
+        for i, im, occ_ratios_i in executor.map(process_image, args_list):
+            data[i, :, :, :] = im
             occ_ratios[i, :] = occ_ratios_i
 
-    data = np.moveaxis(data, -1, 0)
     data = data[..., np.newaxis]
+
     # Create the Zarr file for the dataset
     folder_3 = os.path.basename(dataset['input_folder'])
     folder_2 = os.path.basename(os.path.dirname(dataset['input_folder']))
@@ -134,11 +148,10 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
         }
     }
     zarr_file = ts.open(zarr_spec).result()
-    zarr_file[:, timepoint_i*batch_size:(timepoint_i + 1)*batch_size, :, :, :, channel_num:channel_num + 1] = data
 
-    #occ_ratio_means = np.mean(occ_ratios, axis=0)
+    zarr_file[timepoint_i * batch_size:(timepoint_i + 1) * batch_size, :, :, :, channel_num:channel_num + 1] = data
+
     occ_ratio_json = {}
-    #curr_mean = 0
     occ_ratios_i = 0
     for i in range((timepoint_i * batch_size), ((timepoint_i + 1) * batch_size)):
         for j in range(num_bboxes):
@@ -148,7 +161,6 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
                 filename = f'{j}.{i}.0.0.0.{channel_num}'
             occ_ratio_json[filename] = float(occ_ratios[occ_ratios_i][j])
         occ_ratios_i += 1
-        #curr_mean += 1
     metadata_object = json.dumps(occ_ratio_json, indent=4)
     with open(
             f'{os.path.normpath(os.path.join(os.path.normpath(out_folder), channel_pattern))}_{out_name}img_{timepoint_i}t_{channel_num}ch.json',
@@ -185,6 +197,8 @@ if __name__ == '__main__':
                     help="Preprocessing time in seconds")
     ap.add_argument('--output-zarr-version', type=str, default='zarr3',
                     help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
+    ap.add_argument('--outer-data-shape', type=lambda s: list(map(int, s.split(','))), default=[16, 128, 128, 128, 1],
+                    help="Data shape for the 5D Hypercube (size of the zarr file being written to)")
     ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[16, 128, 128, 128],
                     help="Data shape for the 4D Hypercube")
     args = ap.parse_args()
@@ -203,6 +217,7 @@ if __name__ == '__main__':
     elapsed_sec = args.elapsed_sec
     output_zarr_version = args.output_zarr_version
     data_shape = args.data_shape
+    outer_data_shape = args.outer_data_shape
 
     with open(input_file) as f:
         datasets_json = json.load(f)
@@ -220,10 +235,10 @@ if __name__ == '__main__':
                 channel_pattern = channel_pattern.split("*", 1)[1]
             #channel_pattern = channel_pattern.replace('*','_')
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
-            timepoint_i = int(batch_start_number/batch_size)
+            timepoint_i = int(batch_start_number / batch_size)
             convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
                                  output_name_start_number, batch_size, input_is_zarr, date, channel_num, timepoint_i,
-                                 output_zarr_version, data_shape)
+                                 output_zarr_version, outer_data_shape, data_shape)
 
             end = time.time()
             print(f"Time taken to run the code was {end - start} seconds")
