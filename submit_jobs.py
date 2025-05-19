@@ -290,6 +290,12 @@ if __name__ == '__main__':
     training_image_jobs = {}
     folders_to_delete = []
     elapsed_sec = 0
+    z_min = float('inf')
+    y_min = float('inf')
+    x_min = float('inf')
+    z_max = 0
+    y_max = 0
+    x_max = 0
     training_image_time = time.time()
     for folder_path, dataset in datasets.items():
         curr_training_image_num = 0
@@ -306,6 +312,7 @@ if __name__ == '__main__':
         # Combine them into a path-like string
         metadata['output_folder'] = str(os.path.join(output_folder, *date_ymd, folder_1, folder_2, folder_3))
         metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
+        metadata['cube_size'] = data_shape[1]
         metadata['training_images'] = {}
         if dataset.get('decon'):
             if 'resultDirName' in dataset and dataset['resultDirName']:
@@ -422,6 +429,7 @@ if __name__ == '__main__':
                 metadata_filenames = filenames[i * batch_size:(i * batch_size) + batch_size]
                 if not metadata['training_images'].get(zarr_channel_pattern):
                     metadata['training_images'][zarr_channel_pattern] = {}
+                metadata['training_images'][zarr_channel_pattern]['bbox'] = [z_min, y_min, x_min, z_max, y_max, x_max]
                 if not metadata['training_images'][zarr_channel_pattern].get('channelPatterns'):
                     metadata['training_images'][zarr_channel_pattern]['channelPatterns'] = {}
                 if not metadata['training_images'][zarr_channel_pattern]['channelPatterns'].get(orig_channel_pattern):
@@ -580,9 +588,15 @@ if __name__ == '__main__':
     print('Writing out the metadata')
     metadata_write_time = time.time()
     for folder_path, dataset in datasets.items():
-        metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4)
+        output_folder = datasets[folder_path]['metadata']['output_folder']
+        match = re.search(r'(/\d+/\d{1,2}/\d{1,2}/)', output_folder)
+        if match:
+            split_index = match.start(1)
+            datasets[folder_path]['metadata']['server_folder'] = output_folder[:split_index]
+            datasets[folder_path]['metadata']['output_folder'] = output_folder[split_index:].lstrip('/')
+        metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4, sort_keys=True)
         with open(
-                f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
+                f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["server_folder"], datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
                 'w') as outfile:
             outfile.write(metadata_object)
     print(f'All metadata writton out in {time.time() - metadata_write_time} seconds!')
