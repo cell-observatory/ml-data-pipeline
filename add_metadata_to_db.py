@@ -17,30 +17,21 @@ def add_metadata_to_db(metadata_file, url, key):
     with open(metadata_file) as f:
         metadata = json.load(f)
     training_images = metadata.pop('training_images')
-    channel_patterns_dict = {}
-    for i, channel_pattern in enumerate(metadata['channelPatterns']):
-        channel_patterns_dict[i] = channel_pattern
 
-    bbox = training_images[get_first_key(training_images)]['chunk_names'][get_first_key(training_images[get_first_key(training_images)]['chunk_names'])]['bbox']
-    cube_size = bbox[3] - bbox[0]
-    output_folder = metadata.pop('output_folder')
-
-    # Regex pattern to find /YYYY/M(M)/D(D)/...
-    match = re.search(r'(/\d+/\d{1,2}/\d{1,2}/)', output_folder)
-
-    if match:
-        split_index = match.start(1)
-        server_folder = output_folder[:split_index]
-        output_folder = output_folder[split_index:].lstrip('/')
-    else:
-        raise ValueError("Could not find date folder in path.")
+    bbox = training_images[get_first_key(training_images)]['bbox']
 
     prepared_entry = {
         'software_version': metadata.pop('software_version'),
-        'output_folder': output_folder,
+        'output_folder': metadata.pop('output_folder'),
         'elapsed_sec': metadata.pop('elapsed_sec'),
-        'cube_size': cube_size,
-        'server_folder': server_folder,
+        'cube_size': metadata.pop('cube_size'),
+        'server_folder': metadata.pop('server_folder'),
+        'z_start': bbox[0],
+        'y_start': bbox[1],
+        'x_start': bbox[2],
+        'z_end': bbox[3],
+        'y_end': bbox[4],
+        'x_end': bbox[5],
         'metadata_json': metadata  # Rest of the data in logs will go to metadata
     }
 
