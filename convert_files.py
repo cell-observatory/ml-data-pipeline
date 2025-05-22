@@ -1,19 +1,14 @@
-import copy
 import os
 import re
 import glob
 import time
 import argparse
 from concurrent.futures import ProcessPoolExecutor
-from multiprocessing import Manager
 import numpy as np
 import tensorstore as ts
 import cpptiff
 import zarr
 import json
-
-
-#from importlib.metadata import version
 
 
 def extract_number(filename, pattern):
