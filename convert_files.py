@@ -47,16 +47,17 @@ def get_image_shape(folder_path, filename, input_is_zarr):
     return im_shape
 
 
-def get_chunk_bboxes(folder_path, filename, data_shape, input_is_zarr):
-    im_shape = get_image_shape(folder_path, filename, input_is_zarr)
+def get_chunk_bboxes(data_shape, folder_path='', filename='', input_is_zarr=True, im_shape=None):
+    if not im_shape:
+        im_shape = get_image_shape(folder_path, filename, input_is_zarr)
 
     bboxes = []
     z = im_shape[0] % data_shape[1] // 2
-    while z + data_shape[1] < im_shape[0]:
+    while z + data_shape[1] <= im_shape[0]:
         y = im_shape[1] % data_shape[2] // 2
-        while y + data_shape[2] < im_shape[1]:
+        while y + data_shape[2] <= im_shape[1]:
             x = im_shape[2] % data_shape[3] // 2
-            while x + data_shape[3] < im_shape[2]:
+            while x + data_shape[3] <= im_shape[2]:
                 bboxes.append([z, y, x, z + data_shape[1], y + data_shape[2], x + data_shape[3]])
                 x += data_shape[3]
             y += data_shape[2]
@@ -114,7 +115,7 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     if not data_shape:
         data_shape = [batch_size, 128, 128, 128]
 
-    bboxes = get_chunk_bboxes(folder_path, filenames[0], data_shape, input_is_zarr)
+    bboxes = get_chunk_bboxes(data_shape, folder_path, filenames[0], input_is_zarr)
     num_bboxes = len(bboxes)
 
     data = np.zeros((batch_size,) + tuple(outer_data_shape[1:4]), dtype=np.uint16, order='F')

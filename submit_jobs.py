@@ -370,7 +370,7 @@ if __name__ == '__main__':
             if not num_images_per_dataset:
                 raise Exception(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
                                 f'Found {file_count} files and the batch size is {batch_size}.')
-            bboxes = get_chunk_bboxes(folder_path, files[0], data_shape, dataset.get('input_is_zarr'))
+            bboxes = get_chunk_bboxes(data_shape, folder_path, files[0], dataset.get('input_is_zarr'))
             num_chunks_per_image = len(bboxes)
 
             if not orig_channel_pattern in orig_channel_patterns:
