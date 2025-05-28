@@ -32,16 +32,6 @@ def get_image_shape(folder_path, filename, input_is_zarr):
     if not input_is_zarr:
         im_shape = cpptiff.get_image_shape(os.path.join(folder_path, filename))
     else:
-        # Bug with ts?
-        '''
-        im_ts = ts.open({
-            'driver': 'zarr',
-            'kvstore': {
-                'driver': "file",
-                'path': f'{os.path.normpath(os.path.join(folder_path, filename))}'
-            }
-        }).result()
-        '''
         im_zarr = zarr.open(f'{os.path.normpath(os.path.join(folder_path, filename))}', mode="r")
         im_shape = (im_zarr.shape[2], im_zarr.shape[0], im_zarr.shape[1])
     return im_shape
@@ -84,7 +74,6 @@ def process_image(args):
     if not input_is_zarr:
         im = cpptiff.read_tiff(os.path.join(folder_path, filename), [z_min, z_max])
         im = im[:, y_min:y_max, x_min:x_max]
-        #im = cpptiff.read_tiff(os.path.join(folder_path, filename))
     else:
         im_ts = ts.open({
             'driver': 'zarr',
@@ -96,7 +85,6 @@ def process_image(args):
 
         # Data is YXZ for zarr so transpose it after
         im = im_ts[y_min:y_max, x_min:x_max, z_min:z_max].read().result()
-        #im = im_ts.read().result()
         im = np.transpose(im, (2, 0, 1))
 
     min_val = np.percentile(im, 0.1)
@@ -229,7 +217,6 @@ if __name__ == '__main__':
             start = time.time()
             if tiled:
                 channel_pattern = channel_pattern.split("*", 1)[1]
-            #channel_pattern = channel_pattern.replace('*','_')
             filenames_batch = filenames[batch_start_number:batch_start_number + batch_size]
             timepoint_i = int(batch_start_number / batch_size)
             convert_tiff_to_zarr(datasets[folder_path], folder_path, channel_pattern, filenames_batch, output_folder,
