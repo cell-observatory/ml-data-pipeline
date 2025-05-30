@@ -94,12 +94,13 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          output_folder='',
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
-                         log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None, output_zarr_version='zarr3',
-                         outer_data_shape=None, data_shape=None):
+                         log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None,
+                         output_zarr_version='zarr3',
+                         outer_data_shape=None, data_shape=None, tile_filename='', timepoint_num=0):
     extra_params = ''
     cpus_per_task = 24
     if python_script_name == 'convert_files.py':
-        extra_params = f'''--channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} --output-zarr-version {output_zarr_version} '''
+        extra_params = f'''--channel-patterns {channel_pattern} --channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} --output-zarr-version {output_zarr_version} '''
         if tiled:
             extra_params += '--tiled '
         if input_is_zarr:
@@ -114,6 +115,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += f'--data-shape {data_shape[0]},{data_shape[1]},{data_shape[2]},{data_shape[3]} '
     elif python_script_name == 'decon_dsr.py':
         cpus_per_task = 8
+        extra_params = f'''--channel-patterns {channel_pattern} '''
         if input_file:
             extra_params += f'--input-file {input_file} '
         if decon:
@@ -122,6 +124,9 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += '--dsr '
         if background_path:
             extra_params += f'--background-paths {background_path} --flatfield-paths {flatfield_path} '
+    elif python_script_name == 'create_augmented_files.py':
+        cpus_per_task = 1
+        extra_params = f'''--tile-filenames {tile_filename} --batch-start-number {batch_start_number} --batch-size {batch_size} --timepoint-num {timepoint_num} --channel-num {channel_num} '''
     return f'''#!/bin/sh
 #SBATCH --qos=abc_high
 #SBATCH --partition=abc
@@ -132,13 +137,14 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
 #SBATCH --output={log_dir}/%j.out
 {sys.executable} \
 {os.path.dirname(os.path.abspath(__file__))}/{python_script_name} \
---folder-paths {folder_path} --channel-patterns {channel_pattern} {extra_params}
+--folder-paths {folder_path} {extra_params}
 '''
 
 
 def create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled, channel_num, output_folder,
                                          output_name_start_num, batch_start_number, batch_size, input_is_zarr, date_ymd,
-                                         elapsed_sec, orig_folder_path, output_zarr_version, outer_data_shape, data_shape, log_dir):
+                                         elapsed_sec, orig_folder_path, output_zarr_version, outer_data_shape,
+                                         data_shape, log_dir):
     return create_sbatch_script('convert_files.py', input_file, folder_path, channel_pattern, tiled=tiled,
                                 channel_num=channel_num, output_folder=output_folder,
                                 output_name_start_num=output_name_start_num, batch_start_number=batch_start_number,
@@ -148,13 +154,21 @@ def create_file_conversion_sbatch_script(input_file, folder_path, channel_patter
                                 outer_data_shape=outer_data_shape, data_shape=data_shape, log_dir=log_dir)
 
 
-def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, background_path, flatfield_path, log_dir):
+def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, background_path,
+                                   flatfield_path, log_dir):
     if decon is None:
         decon = False
     if dsr is None:
         dsr = False
     return create_sbatch_script('decon_dsr.py', input_file, folder_path, channel_pattern, decon=decon, dsr=dsr,
                                 background_path=background_path, flatfield_path=flatfield_path, log_dir=log_dir)
+
+
+def create_augmentation_sbatch_script(folder_path, tile_filename, batch_start_number, batch_size, timepoint_num,
+                                      channel_num):
+    return create_sbatch_script('create_augmented_files.py', '', folder_path, '', tile_filename=tile_filename,
+                                batch_start_number=batch_start_number, batch_size=batch_size,
+                                timepoint_num=timepoint_num, channel_num=channel_num)
 
 
 def get_cycle_ms_from_json(file_path):
@@ -254,12 +268,14 @@ if __name__ == '__main__':
                     first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
                     cycle_ms = get_cycle_ms_from_json(first_json)
                     background_channel_pattern = re.search(r'Cam[A-Z]', channel_pattern).group(0)
-                    background_cycle_ms_file_list = glob.glob(f'{background_folder}/*{background_channel_pattern}*.json')
+                    background_cycle_ms_file_list = glob.glob(
+                        f'{background_folder}/*{background_channel_pattern}*.json')
                     background_cycle_ms_diff_list = []
                     for file in background_cycle_ms_file_list:
-                        background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file)-cycle_ms))
-                    background_path_json = background_cycle_ms_file_list[background_cycle_ms_diff_list.index(min(background_cycle_ms_diff_list))]
-                    cycle_ms_pattern = os.path.basename(background_path_json).replace('_JSONsettings.json','')
+                        background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file) - cycle_ms))
+                    background_path_json = background_cycle_ms_file_list[
+                        background_cycle_ms_diff_list.index(min(background_cycle_ms_diff_list))]
+                    cycle_ms_pattern = os.path.basename(background_path_json).replace('_JSONsettings.json', '')
                     background_path = glob.glob(f'{background_folder}/*{cycle_ms_pattern}*.tif')[0]
 
                 script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dataset.get('decon'),
@@ -389,7 +405,7 @@ if __name__ == '__main__':
                     z_max = max(z_max, bbox[3])
                     y_max = max(y_max, bbox[4])
                     x_max = max(x_max, bbox[5])
-                curr_data_shape = [z_max-z_min, y_max-y_min, x_max-x_min]
+                curr_data_shape = [z_max - z_min, y_max - y_min, x_max - x_min]
                 curr_data_shape.insert(0, num_images_per_dataset * batch_size)
                 curr_data_shape.append(num_orig_patterns)
 
