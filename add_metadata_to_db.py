@@ -26,12 +26,14 @@ def add_metadata_to_db(metadata_file, url, key):
         'elapsed_sec': metadata.pop('elapsed_sec'),
         'cube_size': metadata.pop('cube_size'),
         'server_folder': metadata.pop('server_folder'),
+        'time_size': metadata.pop('time_size'),
         'z_start': bbox[0],
         'y_start': bbox[1],
         'x_start': bbox[2],
         'z_end': bbox[3],
         'y_end': bbox[4],
         'x_end': bbox[5],
+        'channel_size': metadata.pop('channel_size'),
         'metadata_json': metadata  # Rest of the data in logs will go to metadata
     }
 

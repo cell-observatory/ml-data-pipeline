@@ -408,6 +408,8 @@ if __name__ == '__main__':
                 curr_data_shape = [z_max - z_min, y_max - y_min, x_max - x_min]
                 curr_data_shape.insert(0, num_images_per_dataset * batch_size)
                 curr_data_shape.append(num_orig_patterns)
+                metadata['time_size'] = data_shape[0]
+                metadata['channel_size'] = data_shape[4]
 
             zarr_channel_pattern = f'{channel_pattern}.zarr'
             if tiled:
