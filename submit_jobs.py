@@ -165,10 +165,10 @@ def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dec
 
 
 def create_augmentation_sbatch_script(folder_path, tile_filename, batch_start_number, batch_size, timepoint_num,
-                                      channel_num):
+                                      channel_num, log_dir):
     return create_sbatch_script('create_augmented_files.py', '', folder_path, '', tile_filename=tile_filename,
                                 batch_start_number=batch_start_number, batch_size=batch_size,
-                                timepoint_num=timepoint_num, channel_num=channel_num)
+                                timepoint_num=timepoint_num, channel_num=channel_num, log_dir=log_dir)
 
 
 def get_cycle_ms_from_json(file_path):
@@ -198,8 +198,6 @@ if __name__ == '__main__':
                     help="Path to the folder to output the images to")
     ap.add_argument('--log-dir', type=str, required=True,
                     help="Path to the folder to output the job logs to")
-    ap.add_argument('--cpu-config-file', type=str, default='',
-                    help="Path to the CPU config file")
     ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[128, 128, 128],
                     help="Data shape for the 3D Cube")
     ap.add_argument('--num-timepoints-per-image', type=int, default=16,
@@ -216,7 +214,6 @@ if __name__ == '__main__':
     input_file = args.input_file
     output_folder = args.output_folder
     log_dir = args.log_dir
-    cpu_config_file = args.cpu_config_file
     data_shape = args.data_shape
     inner_chunk_shape = [1, 32, 32, 32]
     batch_size = args.num_timepoints_per_image
@@ -349,7 +346,7 @@ if __name__ == '__main__':
         channel_patterns = set()
         # Define the pattern for chunked files
         tiled = True
-        pattern = re.compile(r'\d+x_\d+y_\d+z')
+        pattern = re.compile(r'-?\d+x_-?\d+y_-?\d+z')
         for channel_pattern in channel_patterns_copy:
             all_files = [
                 f for f in Path(folder_path).glob('*' + channel_pattern + f'*.{ext}')
@@ -408,8 +405,8 @@ if __name__ == '__main__':
                 curr_data_shape = [z_max - z_min, y_max - y_min, x_max - x_min]
                 curr_data_shape.insert(0, num_images_per_dataset * batch_size)
                 curr_data_shape.append(num_orig_patterns)
-                metadata['time_size'] = data_shape[0]
-                metadata['channel_size'] = data_shape[4]
+                metadata['time_size'] = curr_data_shape[0]
+                metadata['channel_size'] = curr_data_shape[4]
 
             zarr_channel_pattern = f'{channel_pattern}.zarr'
             if tiled:
