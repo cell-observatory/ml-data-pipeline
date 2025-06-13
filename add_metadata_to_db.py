@@ -1,10 +1,31 @@
 import argparse
 import copy
 import json
+import os
 import re
+from pathlib import Path
 
 from supabase import create_client
 
+def get_data_location(supabase, input_folder):
+    g_sheet = supabase.table('g_sheet_master_imaging_list').select('"Data location"').execute().data
+
+    for row in g_sheet:
+        path = os.path.normpath(row['Data location'])
+
+        path = path.replace('\\', '/')
+
+        # Replace drive letters with Linux equivalents
+        if path.startswith('U:/') or path.startswith('U:'):
+            path = path.replace('U:', '/clusterfs/nvme2', 1)
+        elif path.startswith('X:/') or path.startswith('X:'):
+            path = path.replace('X:', '/clusterfs/vast', 1)
+        else:
+            raise Exception(f"Data location: {path} in the Google Sheet needs its server conversion added!")
+
+        if input_folder in path or str(Path(input_folder).parent.absolute()) in path:
+            return row['Data location']
+    raise Exception(f"Data location: {input_folder} was not found in the Google Sheet!")
 
 def get_first_key(d):
     for key in d:
@@ -20,6 +41,8 @@ def add_metadata_to_db(metadata_file, url, key):
 
     bbox = training_images[get_first_key(training_images)]['bbox']
 
+    data_location = get_data_location(supabase, metadata['input_folder'])
+
     prepared_entry = {
         'software_version': metadata.pop('software_version'),
         'output_folder': metadata.pop('output_folder'),
@@ -27,6 +50,7 @@ def add_metadata_to_db(metadata_file, url, key):
         'cube_size': metadata.pop('cube_size'),
         'server_folder': metadata.pop('server_folder'),
         'time_size': metadata.pop('time_size'),
+        'data_location': data_location,
         'z_start': bbox[0],
         'y_start': bbox[1],
         'x_start': bbox[2],
@@ -41,6 +65,14 @@ def add_metadata_to_db(metadata_file, url, key):
     response = supabase.table('prepared').insert(prepared_entry).execute()
 
     prepared_id = response.data[0]['id']
+
+    prepared_tiles_entry_list = []
+    for training_image, training_image_dict in training_images.items():
+        prepared_tiles_entry = {'prepared_id': prepared_id,
+                                'tile_name': training_image}
+        prepared_tiles_entry_list.append(prepared_tiles_entry)
+    response = supabase.table('prepared_tiles').insert(prepared_tiles_entry_list).execute()
+
     prepared_cubes_entry_list = []
     delimiters = r"[./]"
     for training_image, training_image_dict in training_images.items():
@@ -61,6 +93,14 @@ def add_metadata_to_db(metadata_file, url, key):
             if chunk_metadata:
                 prepared_cubes_entry_copy['metadata_json'] = chunk_metadata
             prepared_cubes_entry_list.append(prepared_cubes_entry_copy)
+    '''
+    # Insert 100000 cube entries at a time if possible
+    insert_batch_size = 100000
+    num_cube_entries = len(prepared_cubes_entry_list)
+    insert_batch_size = min(insert_batch_size, num_cube_entries)
+    for i in range(0, num_cube_entries, insert_batch_size):
+        response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list[i:i+insert_batch_size]).execute()
+    '''
     response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list).execute()
     return response
 
