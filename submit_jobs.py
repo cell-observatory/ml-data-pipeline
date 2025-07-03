@@ -3,6 +3,7 @@ import copy
 import glob
 import subprocess
 import math
+import orjson
 import json
 import os
 import sys
@@ -98,7 +99,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          output_zarr_version='zarr3',
                          outer_data_shape=None, data_shape=None, tile_filename='', timepoint_num=0):
     extra_params = ''
-    cpus_per_task = 24
+    cpus_per_task = 4
     if python_script_name == 'convert_files.py':
         extra_params = f'''--channel-patterns {channel_pattern} --channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} --output-zarr-version {output_zarr_version} '''
         if tiled:
@@ -114,7 +115,7 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
         if data_shape:
             extra_params += f'--data-shape {data_shape[0]},{data_shape[1]},{data_shape[2]},{data_shape[3]} '
     elif python_script_name == 'decon_dsr.py':
-        cpus_per_task = 8
+        cpus_per_task = 2
         extra_params = f'''--channel-patterns {channel_pattern} '''
         if input_file:
             extra_params += f'--input-file {input_file} '
@@ -174,20 +175,6 @@ def create_augmentation_sbatch_script(folder_path, tile_filename, batch_start_nu
 def get_cycle_ms_from_json(file_path):
     with open(file_path) as f:
         return json.load(f)['Camera']['Actual']['Cycle (ms)']
-
-
-class Dataset:
-    def __init__(self, channel_patterns, decon, dsr):
-        self.channel_patterns = channel_patterns
-        if decon is not None:
-            self.decon = json.loads(decon.lower())
-        else:
-            self.decon = False
-        if dsr is not None:
-            self.dsr = json.loads(dsr.lower())
-        else:
-            self.dsr = False
-        self.input_is_zarr = False
 
 
 if __name__ == '__main__':
@@ -460,7 +447,7 @@ if __name__ == '__main__':
                         else:
                             filename = f'{j}.{chunk_i}.0.0.0.{curr_channel}'
                         metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
-                        metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = bboxes[j]
+                        metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = [bboxes[j][0]-z_min,bboxes[j][1]-y_min,bboxes[j][2]-x_min,bboxes[j][3]-z_min,bboxes[j][4]-y_min,bboxes[j][5]-x_min]
                 curr_training_image_num += num_chunks_per_image
                 datasets[orig_folder_path]['num_chunks_per_image'] = num_chunks_per_image
         datasets[orig_folder_path]['metadata'] = metadata
@@ -492,7 +479,8 @@ if __name__ == '__main__':
                             occ_ratio_dict = json.load(f)
                         os.remove(file_path)
                         for chunk_name, occ_ratio in occ_ratio_dict.items():
-                            training_images['chunk_names'][chunk_name]['occ_ratio'] = occ_ratio
+                            training_images['chunk_names'][chunk_name]['occ_ratio'] = occ_ratio['occ_ratio']
+                            training_images['chunk_names'][chunk_name]['histogram'] = occ_ratio['histogram']
                     except (json.JSONDecodeError, FileNotFoundError) as e:
                         print(f"Error reading {file_path}: {e}")
     print(f'All occupancy ratios collected in {time.time() - occ_ratios_time} seconds!')
@@ -609,10 +597,11 @@ if __name__ == '__main__':
             split_index = match.start(1)
             datasets[folder_path]['metadata']['server_folder'] = output_folder[:split_index]
             datasets[folder_path]['metadata']['output_folder'] = output_folder[split_index:].lstrip('/')
-        metadata_object = json.dumps(datasets[folder_path]['metadata'], indent=4, sort_keys=True)
+        #metadata_object = orjson.dumps(datasets[folder_path]['metadata'], indent=4, sort_keys=True)
+        metadata_object = orjson.dumps(datasets[folder_path]['metadata'], option= orjson.OPT_SORT_KEYS | orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS)
         with open(
                 f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["server_folder"], datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
-                'w') as outfile:
+                'wb') as outfile:
             outfile.write(metadata_object)
     print(f'All metadata writton out in {time.time() - metadata_write_time} seconds!')
 

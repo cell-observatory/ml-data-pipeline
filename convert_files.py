@@ -90,12 +90,22 @@ def process_image(args):
     min_val = np.percentile(im, 0.1)
     max_val = np.percentile(im, 99.9)
     occ_ratios = np.zeros(num_bboxes, dtype=np.float32, order='F')
+    histograms = np.full(num_bboxes, {}, dtype=dict, order='F')
+    percentiles = np.concatenate([
+        np.arange(0, 11, 1),
+        np.arange(20, 91, 10),
+        np.arange(91, 100, 1),
+        np.round(np.arange(99.1, 100.1, 0.1), 1)
+    ])
+    num_percentiles = len(percentiles)
     for i, bbox in enumerate(bboxes):
         chunk = im[bbox[0]-z_min:bbox[3]-z_min, bbox[1]-y_min:bbox[4]-y_min, bbox[2]-x_min:bbox[5]-x_min]
         within_bounds = (chunk > min_val) & (chunk < max_val)
         occ_ratios[i] = np.mean(within_bounds)
+        hists = np.percentile(chunk, percentiles)
+        histograms[i] = {percentiles[j]: int(hists[j]) for j in range(num_percentiles)}
 
-    return index, im, occ_ratios  # Return index and processed image
+    return index, im, occ_ratios, histograms  # Return index and processed image
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
@@ -109,13 +119,15 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
     data = np.zeros((batch_size,) + tuple(outer_data_shape[1:4]), dtype=np.uint16, order='F')
     num_files = len(filenames)
     occ_ratios = np.zeros((num_files, num_bboxes), dtype=np.float32, order='F')
+    histograms = np.full((num_files, num_bboxes), {}, dtype=dict, order='F')
     args_list = [(i, filenames[i], folder_path, input_is_zarr, bboxes, num_bboxes) for i
                  in
                  range(num_files)]
     with ProcessPoolExecutor() as executor:
-        for i, im, occ_ratios_i in executor.map(process_image, args_list):
+        for i, im, occ_ratios_i, histograms_i in executor.map(process_image, args_list):
             data[i, :, :, :] = im
             occ_ratios[i, :] = occ_ratios_i
+            histograms[i,:] = histograms_i
 
     data = data[..., np.newaxis]
 
@@ -143,7 +155,9 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
                 filename = f'c/{j}/{i}/0/0/0/{channel_num}'
             else:
                 filename = f'{j}.{i}.0.0.0.{channel_num}'
-            occ_ratio_json[filename] = float(occ_ratios[occ_ratios_i][j])
+            occ_ratio_json[filename] = {}
+            occ_ratio_json[filename]['occ_ratio'] = float(occ_ratios[occ_ratios_i][j])
+            occ_ratio_json[filename]['histogram'] = histograms[occ_ratios_i][j]
         occ_ratios_i += 1
     metadata_object = json.dumps(occ_ratio_json, indent=4)
     with open(
