@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 
 from supabase import create_client
+from supabase.lib.client_options import ClientOptions, SyncClientOptions
+
 
 def get_data_location(supabase, input_folder):
     g_sheet = supabase.table('g_sheet_master_imaging_list').select('"Data location"').execute().data
@@ -34,7 +36,7 @@ def get_first_key(d):
 
 def add_metadata_to_db(metadata_file, url, key):
     # Supabase client
-    supabase = create_client(url, key)
+    supabase = create_client(url, key, options=SyncClientOptions(postgrest_client_timeout=600, storage_client_timeout=600, schema="public"))
     with open(metadata_file) as f:
         metadata = json.load(f)
     training_images = metadata.pop('training_images')
@@ -93,15 +95,15 @@ def add_metadata_to_db(metadata_file, url, key):
             if chunk_metadata:
                 prepared_cubes_entry_copy['metadata_json'] = chunk_metadata
             prepared_cubes_entry_list.append(prepared_cubes_entry_copy)
-    '''
-    # Insert 100000 cube entries at a time if possible
-    insert_batch_size = 100000
+
+    # Insert 10000 cube entries at a time if possible
+    insert_batch_size = 10000
     num_cube_entries = len(prepared_cubes_entry_list)
     insert_batch_size = min(insert_batch_size, num_cube_entries)
     for i in range(0, num_cube_entries, insert_batch_size):
         response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list[i:i+insert_batch_size]).execute()
-    '''
-    response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list).execute()
+
+    #response = supabase.table('prepared_cubes').insert(prepared_cubes_entry_list).execute()
     return response
 
 
