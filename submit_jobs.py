@@ -13,7 +13,7 @@ from pathlib import Path
 
 import tensorstore as ts
 
-from convert_files import get_chunk_bboxes, get_image_shape, get_filenames
+from convert_files import get_chunk_bboxes, get_filenames
 import inspect
 import re
 from datetime import datetime
@@ -24,7 +24,7 @@ from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
 def create_zarr_spec(zarr_version, path, data_shape, cube_shape, chunk_shape, num_timepoints_per_image):
     if zarr_version == 'zarr3':
-        shard_shape = [num_timepoints_per_image, cube_shape[0], cube_shape[1], cube_shape[2], 1]
+        shard_shape = [num_timepoints_per_image, cube_shape[0], cube_shape[1], cube_shape[2], 2]
         zarr_spec = {
             'driver': zarr_version,
             'kvstore': {
@@ -354,7 +354,7 @@ if __name__ == '__main__':
         zarr_channel_pattern = ''
         curr_data_shape = copy.deepcopy(data_shape)
         curr_chunk_shape = copy.deepcopy(inner_chunk_shape)
-        curr_chunk_shape.append(1)
+        curr_chunk_shape.append(2)
         for channel_pattern in dataset['channelPatterns']:
             orig_channel_pattern = copy.deepcopy(channel_pattern)
             if tiled:
