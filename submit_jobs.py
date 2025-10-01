@@ -18,6 +18,8 @@ import inspect
 import re
 from datetime import datetime
 import time
+from PyPetaKit5D import XR_chromatic_shift_correction_data_wrapper
+from PyPetaKit5D import XR_unmix_channels_data_wrapper
 from PyPetaKit5D import XR_decon_data_wrapper
 from PyPetaKit5D import XR_deskew_rotate_data_wrapper
 
@@ -95,7 +97,8 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          output_folder='',
                          output_name_start_num=0, batch_start_number=0,
                          batch_size=16, input_is_zarr=False, date_ymd=None, elapsed_sec=0, orig_folder_path=None,
-                         log_dir='', decon=False, dsr=False, background_path=None, flatfield_path=None,
+                         log_dir='', csc_unmixing=False, decon=False, dsr=False, background_path=None,
+                         flatfield_path=None,
                          output_zarr_version='zarr3',
                          outer_data_shape=None, data_shape=None, tile_filename='', timepoint_num=0):
     extra_params = ''
@@ -114,11 +117,22 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += f'--outer-data-shape {outer_data_shape[0]},{outer_data_shape[1]},{outer_data_shape[2]},{outer_data_shape[3]},{outer_data_shape[4]} '
         if data_shape:
             extra_params += f'--data-shape {data_shape[0]},{data_shape[1]},{data_shape[2]},{data_shape[3]} '
+    elif python_script_name == 'csc_unmixing.py':
+        cpus_per_task = 2
+        extra_params = f'''--channel-patterns {channel_pattern} '''
+        if input_file:
+            extra_params += f'--input-file {input_file} '
+        if csc_unmixing:
+            extra_params += '--csc-unmixing '
+        if background_path:
+            extra_params += f'--background-paths {background_path} --flatfield-paths {flatfield_path} '
     elif python_script_name == 'decon_dsr.py':
         cpus_per_task = 2
         extra_params = f'''--channel-patterns {channel_pattern} '''
         if input_file:
             extra_params += f'--input-file {input_file} '
+        if csc_unmixing:
+            extra_params += '--csc-unmixing '
         if decon:
             extra_params += '--decon '
         if dsr:
@@ -155,13 +169,25 @@ def create_file_conversion_sbatch_script(input_file, folder_path, channel_patter
                                 outer_data_shape=outer_data_shape, data_shape=data_shape, log_dir=log_dir)
 
 
-def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, decon, dsr, background_path,
+def create_csc_unmixing_sbatch_script(input_file, folder_path, channel_pattern, csc_unmixing, background_path,
+                                      flatfield_path, log_dir):
+    if csc_unmixing is None:
+        csc_unmixing = False
+
+    return create_sbatch_script('csc_unmixing.py', input_file, folder_path, channel_pattern, csc_unmixing=csc_unmixing,
+                                background_path=background_path, flatfield_path=flatfield_path, log_dir=log_dir)
+
+
+def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, csc_unmixing, decon, dsr, background_path,
                                    flatfield_path, log_dir):
+    if csc_unmixing is None:
+        csc_unmixing = False
     if decon is None:
         decon = False
     if dsr is None:
         dsr = False
-    return create_sbatch_script('decon_dsr.py', input_file, folder_path, channel_pattern, decon=decon, dsr=dsr,
+    return create_sbatch_script('decon_dsr.py', input_file, folder_path, channel_pattern, csc_unmixing=csc_unmixing,
+                                decon=decon, dsr=dsr,
                                 background_path=background_path, flatfield_path=flatfield_path, log_dir=log_dir)
 
 
@@ -210,6 +236,10 @@ if __name__ == '__main__':
     background_folder = args.background_folder
     data_shape.insert(0, batch_size)
     date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
+    run_csc_unmixing = False
+    csc_unmixing_jobs = {}
+    csc_unmixing_job_start_times = {}
+    csc_unmixing_job_times = {}
     run_decon_dsr = False
     decon_dsr_jobs = {}
     decon_dsr_job_start_times = {}
@@ -218,8 +248,14 @@ if __name__ == '__main__':
     with open(input_file) as f:
         datasets = json.load(f)
 
-    with open(inspect.getfile(XR_decon_data_wrapper), "r", encoding="utf-8") as f:
+    with open(inspect.getfile(XR_chromatic_shift_correction_data_wrapper), "r", encoding="utf-8") as f:
         decon_dsr_text = f.read()
+
+    with open(inspect.getfile(XR_unmix_channels_data_wrapper), "r", encoding="utf-8") as f:
+        decon_dsr_text += f.read()
+
+    with open(inspect.getfile(XR_decon_data_wrapper), "r", encoding="utf-8") as f:
+        decon_dsr_text += f.read()
 
     with open(inspect.getfile(XR_deskew_rotate_data_wrapper), "r", encoding="utf-8") as f:
         decon_dsr_text += f.read()
@@ -227,53 +263,116 @@ if __name__ == '__main__':
     matches = re.findall(r'"(.*?)": \[', decon_dsr_text)
     valid_params = {key: True for key in matches}
 
+    csc_unmixing_time = time.time()
+    for folder_path, dataset in datasets.items():
+        if dataset.get('csc_unmixing'):
+            run_csc_unmixing = True
+            for param, value in dataset.items():
+                if param == 'csc_unmixing' or param == 'decon' or param == 'dsr':
+                    continue
+                if param not in valid_params:
+                    raise SystemExit(f'{param} is not a valid parameter for PetaKit5D!')
+
+            for i in range(0, len(dataset['channelPatterns']), 2):
+                first_channel_pattern = dataset['channelPatterns'][i]
+                if i + 1 < len(dataset['channelPatterns']):
+                    second_channel_pattern = dataset['channelPatterns'][i + 1]
+                else:
+                    raise SystemExit(f'{dataset["channelPatterns"][i]} requires a paired pattern for csc and unmixing')
+                file_count = len(glob.glob(f'{folder_path}/*{first_channel_pattern}*.tif'))
+                num_images_per_dataset = math.floor(file_count / batch_size)
+                if not num_images_per_dataset:
+                    raise SystemExit(
+                        f'Not enough files in {folder_path} for channel pattern \'{first_channel_pattern}\'!\n'
+                        f'Found {file_count} files and the batch size is {batch_size}.')
+                datasets[folder_path]['input_is_zarr'] = True
+                background_paths = None
+                flatfield_paths = None
+                # Set the background paths if they are not set already
+                if 'FFCorrection' in dataset and ('backgroundPaths' not in dataset or not dataset['backgroundPaths']):
+                    flatfield_paths = '/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif,/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif'
+
+
+                    def get_background_path(channel_pattern):
+                        first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
+                        cycle_ms = get_cycle_ms_from_json(first_json)
+                        background_channel_pattern = re.search(r'Cam[A-Z]', channel_pattern).group(0)
+                        background_cycle_ms_file_list = glob.glob(
+                            f'{background_folder}/*{background_channel_pattern}*.json')
+                        background_cycle_ms_diff_list = []
+                        for file in background_cycle_ms_file_list:
+                            background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file) - cycle_ms))
+                        background_path_json = background_cycle_ms_file_list[
+                            background_cycle_ms_diff_list.index(min(background_cycle_ms_diff_list))]
+                        cycle_ms_pattern = os.path.basename(background_path_json).replace('_JSONsettings.json', '')
+                        return glob.glob(f'{background_folder}/*{cycle_ms_pattern}*.tif')[0]
+
+
+                    background_paths = f'{get_background_path(first_channel_pattern)},{get_background_path(second_channel_pattern)}'
+
+                script = create_csc_unmixing_sbatch_script(input_file, folder_path,
+                                                           f'{first_channel_pattern},{second_channel_pattern}',
+                                                           dataset.get('csc_unmixing'), background_paths, flatfield_paths,
+                                                           log_dir)
+                key = f'Folder: {folder_path} Channel: {first_channel_pattern},{second_channel_pattern}'
+                csc_unmixing_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                 stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE)
+                csc_unmixing_job.stdin.write(script)
+                csc_unmixing_job.stdin.close()
+
+                csc_unmixing_job_start_times[key] = time.time()
+                csc_unmixing_jobs[key] = csc_unmixing_job
+    if run_csc_unmixing:
+        running_csc_unmixing_jobs = set(csc_unmixing_jobs.keys())
+        print('Waiting for CSC/Unmixing jobs to finish')
+        while running_csc_unmixing_jobs:
+            running_csc_unmixing_jobs_copy = copy.deepcopy(running_csc_unmixing_jobs)
+            for key in running_csc_unmixing_jobs_copy:
+                if csc_unmixing_jobs[key].poll() is not None:
+                    csc_unmixing_job_times[key] = time.time() - csc_unmixing_job_start_times[key]
+                    print(f'Job for {key} Finished!')
+                    running_csc_unmixing_jobs.discard(key)
+            time.sleep(1)
+        print(f'All CSC/Unmixing jobs finished in {time.time() - csc_unmixing_time} seconds!')
+
     decon_dsr_time = time.time()
     for folder_path, dataset in datasets.items():
         if dataset.get('decon') or dataset.get('dsr'):
             run_decon_dsr = True
             for param, value in dataset.items():
-                if param == 'decon' or param == 'dsr':
+                if param == 'csc_unmixing' or param == 'decon' or param == 'dsr' or param == 'input_is_zarr':
                     continue
                 if param not in valid_params:
                     raise SystemExit(f'{param} is not a valid parameter for PetaKit5D!')
-
+            channel_patterns = ''
             for i, channel_pattern in enumerate(dataset['channelPatterns']):
-                file_count = len(glob.glob(f'{folder_path}/*{channel_pattern}*.tif'))
-                num_images_per_dataset = math.floor(file_count / batch_size)
-                if not num_images_per_dataset:
-                    raise SystemExit(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
-                                     f'Found {file_count} files and the batch size is {batch_size}.')
-                datasets[folder_path]['input_is_zarr'] = True
-                background_path = None
-                flatfield_path = None
-                # Set the background paths if they are not set already
-                if 'FFCorrection' in dataset and ('backgroundPaths' not in dataset or not dataset['backgroundPaths']):
-                    flatfield_path = '/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif'
-                    first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
-                    cycle_ms = get_cycle_ms_from_json(first_json)
-                    background_channel_pattern = re.search(r'Cam[A-Z]', channel_pattern).group(0)
-                    background_cycle_ms_file_list = glob.glob(
-                        f'{background_folder}/*{background_channel_pattern}*.json')
-                    background_cycle_ms_diff_list = []
-                    for file in background_cycle_ms_file_list:
-                        background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file) - cycle_ms))
-                    background_path_json = background_cycle_ms_file_list[
-                        background_cycle_ms_diff_list.index(min(background_cycle_ms_diff_list))]
-                    cycle_ms_pattern = os.path.basename(background_path_json).replace('_JSONsettings.json', '')
-                    background_path = glob.glob(f'{background_folder}/*{cycle_ms_pattern}*.tif')[0]
+                if not dataset.get('csc_unmixing'):
+                    file_count = len(glob.glob(f'{folder_path}/*{channel_pattern}*.tif'))
+                    num_images_per_dataset = math.floor(file_count / batch_size)
+                    if not num_images_per_dataset:
+                        raise SystemExit(f'Not enough files in {folder_path} for channel pattern \'{channel_pattern}\'!\n'
+                                         f'Found {file_count} files and the batch size is {batch_size}.')
+                    datasets[folder_path]['input_is_zarr'] = True
+                channel_patterns += f'{channel_pattern},'
+            channel_patterns = channel_patterns[:-1]
+            background_path = None
+            flatfield_path = None
 
-                script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, dataset.get('decon'),
-                                                        dataset.get('dsr'), background_path, flatfield_path,
-                                                        log_dir)
-                key = f'Folder: {folder_path} Channel: {channel_pattern}'
-                decon_dsr_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                 stdout=subprocess.PIPE,
-                                                 stderr=subprocess.PIPE)
-                decon_dsr_job.stdin.write(script)
-                decon_dsr_job.stdin.close()
+            script = create_decon_dsr_sbatch_script(input_file, folder_path, channel_patterns,
+                                                    dataset.get('csc_unmixing'),
+                                                    dataset.get('decon'), dataset.get('dsr'), background_path,
+                                                    flatfield_path,
+                                                    log_dir)
+            key = f'Folder: {folder_path} Channel: {channel_patterns}'
+            decon_dsr_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                             stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE)
+            decon_dsr_job.stdin.write(script)
+            decon_dsr_job.stdin.close()
 
-                decon_dsr_job_start_times[key] = time.time()
-                decon_dsr_jobs[key] = decon_dsr_job
+            decon_dsr_job_start_times[key] = time.time()
+            decon_dsr_jobs[key] = decon_dsr_job
     if run_decon_dsr:
         running_decon_dsr_jobs = set(decon_dsr_jobs.keys())
         print('Waiting for Decon/DSR jobs to finish')
@@ -314,19 +413,34 @@ if __name__ == '__main__':
         metadata['software_version'] = f'PyPetaKit5D {version("PyPetaKit5D")}'
         metadata['cube_size'] = data_shape[1]
         metadata['training_images'] = {}
+        folder_appended = False
+        if dataset.get('csc_unmixing'):
+            if 'resultDirName' in dataset and dataset['resultDirName']:
+                folder_path = os.path.join(folder_path, dataset['resultDirName'])
+            else:
+                folder_path = os.path.join(folder_path, 'Chromatic_Shift_Corrected')
+            folders_to_delete.append(folder_path)
+            folder_appended = True
+            if 'resultDirName' in dataset and dataset['resultDirName']:
+                folder_path = os.path.join(folder_path, dataset['resultDirName'])
+            else:
+                folder_path = os.path.join(folder_path, 'Unmixed')
         if dataset.get('decon'):
             if 'resultDirName' in dataset and dataset['resultDirName']:
                 folder_path = os.path.join(folder_path, dataset['resultDirName'])
             else:
                 folder_path = os.path.join(folder_path, 'matlab_decon')
-            folders_to_delete.append(folder_path)
+            if not folder_appended:
+                folders_to_delete.append(folder_path)
+                folder_appended = True
         if dataset.get('dsr'):
             if 'DSRDirName' in dataset and dataset['DSRDirName']:
                 folder_path = os.path.join(folder_path, dataset['DSRDirName'])
             else:
                 folder_path = os.path.join(folder_path, 'DSR')
-            if not dataset.get('decon'):
+            if not folder_appended:
                 folders_to_delete.append(folder_path)
+                folder_appended = True
 
         # Create new Channel Patterns based on tiles
         channel_patterns_copy = copy.deepcopy(dataset['channelPatterns'])
@@ -360,7 +474,7 @@ if __name__ == '__main__':
             if tiled:
                 orig_channel_pattern = orig_channel_pattern.split('*', 1)[0]
             if dataset.get('decon') or dataset.get('dsr'):
-                elapsed_sec = decon_dsr_job_times[f'Folder: {orig_folder_path} Channel: {orig_channel_pattern}']
+                elapsed_sec = decon_dsr_job_times[f'Folder: {orig_folder_path} Channel: {",".join(sorted(set([s.split("*", 1)[0] for s in dataset["channelPatterns"]])))}']
             else:
                 elapsed_sec = 0
 
@@ -447,7 +561,9 @@ if __name__ == '__main__':
                         else:
                             filename = f'{j}.{chunk_i}.0.0.0.{curr_channel}'
                         metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename] = {}
-                        metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = [bboxes[j][0]-z_min,bboxes[j][1]-y_min,bboxes[j][2]-x_min,bboxes[j][3]-z_min,bboxes[j][4]-y_min,bboxes[j][5]-x_min]
+                        metadata['training_images'][zarr_channel_pattern]['chunk_names'][filename]['bbox'] = [
+                            bboxes[j][0] - z_min, bboxes[j][1] - y_min, bboxes[j][2] - x_min, bboxes[j][3] - z_min,
+                            bboxes[j][4] - y_min, bboxes[j][5] - x_min]
                 curr_training_image_num += num_chunks_per_image
                 datasets[orig_folder_path]['num_chunks_per_image'] = num_chunks_per_image
         datasets[orig_folder_path]['metadata'] = metadata
@@ -598,7 +714,8 @@ if __name__ == '__main__':
             datasets[folder_path]['metadata']['server_folder'] = output_folder[:split_index]
             datasets[folder_path]['metadata']['output_folder'] = output_folder[split_index:].lstrip('/')
         #metadata_object = orjson.dumps(datasets[folder_path]['metadata'], indent=4, sort_keys=True)
-        metadata_object = orjson.dumps(datasets[folder_path]['metadata'], option= orjson.OPT_SORT_KEYS | orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS)
+        metadata_object = orjson.dumps(datasets[folder_path]['metadata'],
+                                       option=orjson.OPT_SORT_KEYS | orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS)
         with open(
                 f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["server_folder"], datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
                 'wb') as outfile:
