@@ -1,5 +1,5 @@
 {
-  "MCRParam": "/global/home/users/matthewmueller/miniconda3/envs/mlDataPipeline/lib/python3.11/site-packages/PyPetaKit5D/MATLAB_Runtime/R2023a",
+  "MCRParam": "/global/home/users/matthewmueller/miniconda3/envs/mlDataPipeline/lib/python3.11/site-packages/PyPetaKit5D/MATLAB_Runtime/R2024b",
   "MCCMasterStr": "/global/home/users/matthewmueller/miniconda3/envs/mlDataPipeline/lib/python3.11/site-packages/PyPetaKit5D/PetaKit5D/mcc/linux/run_mccMaster.sh",
   "BashLaunchStr": "module load parallel/20220522",
   "SlurmParam": "-p abc --qos abc_high -n1 --mem-per-cpu=21000M",
@@ -7,10 +7,10 @@
   "maxCPUNum": 24,
   "minCPUNum": 2,
   "wholeNodeJob": false,
-  "MemPerCPU": 20.9,
+  "memPerCPU": 20.9,
   "GNUparallel": false,
   "jobTimeLimit": 12,
   "maxJobNum": 100000,
-  "taskBatchNum": 1,
+  "taskBatchNum": 4,
   "masterCompute": true
 }
