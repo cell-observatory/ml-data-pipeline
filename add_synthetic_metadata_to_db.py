@@ -58,7 +58,8 @@ def add_synthetic_metadata_to_db(metadata_file, url, key):
             tile_rows = df_prepared_tiles[df_prepared_tiles["prepared_id"] == prepared_row.id]
             for tile_row in tile_rows.itertuples(index=False):
                 prepared_tiles_entry = {'prepared_id': prepared_id,
-                                        'tile_name': tile_row.tile_name}
+                                        'tile_name': tile_row.tile_name,
+                                        'metadata_tile_json': json.loads(tile_row.metadata_tile_json)}
                 prepared_tiles_entry_list.append(prepared_tiles_entry)
             response = supabase.table('prepared_tiles').insert(prepared_tiles_entry_list).execute()
 
