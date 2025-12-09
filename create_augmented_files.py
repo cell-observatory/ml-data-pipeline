@@ -95,7 +95,7 @@ def process_image(args):
     max_val = np.percentile(im, 99.9)
     occ_ratios = np.zeros(num_bboxes, dtype=np.float32, order='F')
     for i, bbox in enumerate(bboxes):
-        chunk = im[bbox[0]-z_min:bbox[3]-z_min, bbox[1]-y_min:bbox[4]-y_min, bbox[2]-x_min:bbox[5]-x_min]
+        chunk = im[bbox[0] - z_min:bbox[3] - z_min, bbox[1] - y_min:bbox[4] - y_min, bbox[2] - x_min:bbox[5] - x_min]
         within_bounds = (chunk > min_val) & (chunk < max_val)
         occ_ratios[i] = np.mean(within_bounds)
 
@@ -103,7 +103,8 @@ def process_image(args):
 
 
 def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_folder, out_name, batch_size,
-                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version, outer_data_shape, data_shape=None):
+                         input_is_zarr, date, channel_num, timepoint_i, output_zarr_version, outer_data_shape,
+                         data_shape=None):
     if not data_shape:
         data_shape = [batch_size, 128, 128, 128]
 
@@ -156,17 +157,31 @@ def convert_tiff_to_zarr(dataset, folder_path, channel_pattern, filenames, out_f
         outfile.write(metadata_object)
 
 
-def augment_chunk(chunk, pixel_size, angle, orig_cube_size):
+def crop_center_cube(arr: np.ndarray, cube_size):
+    z, y, x = arr.shape
+    cz, cy, cx = cube_size
+
+    start_z = (z - cz) // 2
+    start_y = (y - cy) // 2
+    start_x = (x - cx) // 2
+
+    return arr[start_z:start_z + cz, start_y:start_y + cy, start_x:start_x + cx]
+
+
+def augment_chunk(chunk, pixel_size, angle, orig_cube_size, crop_size):
     # Rotate in XY around Z
-    chunk = rotate(chunk, angle=angle[1], axes=(1, 2), reshape=False, order=1)
+    chunk = rotate(chunk, angle=angle[1], axes=(1, 2), reshape=False, order=0)
 
     # Rotate in ZY around X
-    chunk = rotate(chunk, angle=angle[0], axes=(0, 1), reshape=False, order=1)
+    chunk = rotate(chunk, angle=angle[0], axes=(0, 1), reshape=False, order=0)
 
-    return resize(chunk, (orig_cube_size, orig_cube_size, orig_cube_size), order=1, preserve_range=True, anti_aliasing=True)
+    chunk = crop_center_cube(chunk, crop_size)
+
+    return resize(chunk, (orig_cube_size, orig_cube_size, orig_cube_size), order=0, preserve_range=True,
+                  anti_aliasing=False)
 
 
-def augment_chunk_from_tile(filename, bbox, timepoint_num, channel_num, pixel_size, angle, orig_cube_size):
+def augment_chunk_from_tile(filename, bbox, timepoint_num, channel_num, pixel_size, angle, orig_cube_size, crop_size):
     zarr_spec = {
         'driver': 'zarr3',
         'kvstore': {
@@ -178,8 +193,26 @@ def augment_chunk_from_tile(filename, bbox, timepoint_num, channel_num, pixel_si
 
     chunk = zarr_file[timepoint_num, bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5], channel_num].read().result()
 
-    return augment_chunk(chunk, pixel_size, angle, orig_cube_size)
+    return augment_chunk(chunk, pixel_size, angle, orig_cube_size, crop_size)
 
+
+def get_chunk_bounding_box(i, chunk_size, num_chunks):
+    #num_x, num_y, num_z = num_chunks
+    #cx, cy, cz = chunk_size
+
+    x = i % num_chunks[2]
+    y = (i // num_chunks[2]) % num_chunks[1]
+    z = (i // (num_chunks[2] * num_chunks[1])) % num_chunks[0]
+
+    start_x = x * chunk_size[2]
+    start_y = y * chunk_size[1]
+    start_z = z * chunk_size[0]
+
+    end_x = start_x + chunk_size[2]
+    end_y = start_y + chunk_size[1]
+    end_z = start_z + chunk_size[0]
+
+    return [start_z, start_y, start_x, end_z, end_y, end_x]
 
 
 if __name__ == '__main__':
@@ -197,6 +230,8 @@ if __name__ == '__main__':
                     help="Number of the timepoint to process")
     ap.add_argument('--channel-num', type=int, required=True,
                     help="Number of the channel to process")
+    ap.add_argument('--num-timepoints-per-image', type=int, default=16,
+                    help="Number of timepoints in a training image")
     args = ap.parse_args()
     folder_paths = args.folder_paths
     tile_filenames = args.tile_filenames
@@ -204,23 +239,40 @@ if __name__ == '__main__':
     batch_size = args.batch_size
     timepoint_num = args.timepoint_num
     channel_num = args.channel_num
+    num_timepoints_per_image = args.num_timepoints_per_image
 
-    batch_end_number = batch_start_number+batch_size
+    batch_end_number = batch_start_number + batch_size
 
     for folder_path in folder_paths:
         with open(os.path.join(folder_path, 'metadata.json')) as f:
             metadata = json.load(f)
+        start = time.time()
+
         for tile_name in tile_filenames:
             tile = metadata['training_images'][tile_name]
-            orig_filename = os.path.join(metadata['input_folder'],tile_name)
-            filename = os.path.join(metadata['server_folder'],metadata['output_folder'],tile_name)
-            delimiters = r"[./]"
-            for chunk_name, chunk in tile['chunk_names'].items():
-                curr_chunk_list = re.split(delimiters, chunk_name)
-                curr_chunk_list.remove('c')
-                if curr_chunk_list[0] >= batch_start_number and curr_chunk_list[0] < batch_end_number and curr_chunk_list[1] == timepoint_num and curr_chunk_list[5] == channel_num:
-                    bbox = [chunk['augmentation_bbox'][0]-tile['bbox'][0], chunk['augmentation_bbox'][1]-tile['bbox'][1], chunk['augmentation_bbox'][2]-tile['bbox'][2],
-                            chunk['augmentation_bbox'][3]-tile['bbox'][0], chunk['augmentation_bbox'][4]-tile['bbox'][1], chunk['augmentation_bbox'][5]-tile['bbox'][2]]
-                    augmented_chunk = augment_chunk_from_tile(orig_filename, bbox, timepoint_num, channel_num,
-                                            metadata['augmentation_info']['pixel_size'],
-                                            metadata['augmentation_info']['angle'], metadata['cube_size'])
+            orig_filename = os.path.join(metadata['input_folder'], tile_name)
+            filename = os.path.join(metadata['server_folder'], metadata['output_folder'], tile_name)
+            zarr_spec = {
+                'driver': 'zarr3',
+                'kvstore': {
+                    'driver': 'file',
+                    'path': filename
+                }
+            }
+            zarr_file = ts.open(zarr_spec).result()
+            for timepoint in range(timepoint_num, timepoint_num+num_timepoints_per_image):
+                for i in range(batch_start_number, batch_end_number):
+                    chunk = tile['chunk_names'][str(i)]
+                    augmented_chunk = augment_chunk_from_tile(orig_filename, chunk['bbox'], timepoint, channel_num,
+                                                              metadata['augmentation_info']['pixel_size'],
+                                                              metadata['augmentation_info']['angle'], metadata['cube_size'],
+                                                              metadata['augmentation_info']['new_size'])
+                    bbox = get_chunk_bounding_box(i, [metadata['cube_size'], metadata['cube_size'], metadata['cube_size']],
+                                                  [metadata['augmentation_info']['num_z_chunks'],
+                                                   metadata['augmentation_info']['num_y_chunks'],
+                                                   metadata['augmentation_info']['num_x_chunks']])
+
+                    zarr_file[timepoint, bbox[0]:bbox[3], bbox[1]:bbox[4], bbox[2]:bbox[5], channel_num] = augmented_chunk
+
+        end = time.time()
+        print(f"Time taken to run the code was {end - start} seconds")
