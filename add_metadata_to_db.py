@@ -46,7 +46,8 @@ def add_metadata_to_db(metadata_file, url, key):
 
     bbox = training_images[get_first_key(training_images)]['bbox']
 
-    data_location = get_data_location(supabase, metadata['input_folder'])
+    #data_location = get_data_location(supabase, metadata['input_folder'])
+    data_location = os.path.join(metadata['server_folder'], metadata['output_folder'])
 
     prepared_entry = {
         'software_version': metadata.pop('software_version'),
