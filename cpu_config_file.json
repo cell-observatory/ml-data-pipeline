@@ -12,5 +12,6 @@
   "jobTimeLimit": 12,
   "maxJobNum": 100000,
   "taskBatchNum": 4,
-  "masterCompute": true
+  "masterCompute": true,
+  "tmpDir": "/clusterfs/vast/matthewmueller/tmp"
 }
