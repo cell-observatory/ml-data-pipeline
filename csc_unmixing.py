@@ -19,7 +19,11 @@ if __name__ == '__main__':
     ap.add_argument('--background-paths', type=lambda s: list(map(str, s.split(','))), default=None,
                     help="Paths to the background files separated by comma")
     ap.add_argument('--flatfield-paths', type=lambda s: list(map(str, s.split(','))), default=None,
-                    help="Paths to the  separated by comma")
+                    help="Paths to the flatfield files separated by comma")
+    ap.add_argument('--chromatic-offset', type=str, default=None,
+                    help="JSON array of chromatic offsets, e.g. '[[0,0,0],[5,-12,-1]]'")
+    ap.add_argument('--unmix-pairs', type=str, default=None,
+                    help="JSON array of unmix pair dicts from preprocessing profile")
     args = ap.parse_args()
     input_file = args.input_file
     folder_paths = args.folder_paths
@@ -27,6 +31,14 @@ if __name__ == '__main__':
     csc_unmixing = args.csc_unmixing
     background_paths = args.background_paths
     flatfield_paths = args.flatfield_paths
+
+    if args.chromatic_offset is None:
+        raise ValueError("chromatic_offset is required")
+    if args.unmix_pairs is None:
+        raise ValueError("unmix_pairs is required")
+
+    chromatic_offset = json.loads(args.chromatic_offset)
+    unmix_pairs = json.loads(args.unmix_pairs)
 
     with open(input_file) as f:
         datasets_json = json.load(f)
@@ -58,29 +70,30 @@ if __name__ == '__main__':
                     kwargs[param] = value
             kwargs['channelPatterns'] = channel_patterns
             kwargs['saveZarr'] = True
-            kwargs['chromaticOffset'] = [[0, 0, 0],[5, -12, -1]]
+            kwargs['chromaticOffset'] = chromatic_offset
             run_csc([folder_path], **kwargs)
-            kwargs = {}
-            for param, value in dataset.items():
-                if param in valid_unmixing_params:
-                    kwargs[param] = value
-            kwargs['channelPatterns'] = channel_patterns
-            kwargs['zarrFile'] = True
-            kwargs['saveZarr'] = True
-            kwargs['unmixFactors'] = [-0.112, 1]
-            kwargs['channelInd'] = 2
-            if background_paths:
-                kwargs['FFImagePaths'] = flatfield_paths
-                kwargs['backgroundPaths'] = background_paths
-            if 'resultDirName' in dataset:
-                folder_path = os.path.join(folder_path, dataset['resultDirName'])
-            else:
-                folder_path = os.path.join(folder_path, 'Chromatic_Shift_Corrected')
-            run_unmixing([folder_path], **kwargs)
-            kwargs['channelPatterns'] = [channel_patterns[0]]
-            kwargs['unmixFactors'] = [1]
-            kwargs['channelInd'] = 1
-            if background_paths:
-                kwargs['FFImagePaths'] = [flatfield_paths[0]]
-                kwargs['backgroundPaths'] = [background_paths[0]]
-            run_unmixing([folder_path], **kwargs)
+            for pair_i, pair in enumerate(unmix_pairs):
+                kwargs = {}
+                for param, value in dataset.items():
+                    if param in valid_unmixing_params:
+                        kwargs[param] = value
+
+                pair_channel_indices = pair['channel_indices']
+                pair_channel_patterns = [channel_patterns[ci] for ci in pair_channel_indices]
+
+                kwargs['channelPatterns'] = pair_channel_patterns
+                kwargs['zarrFile'] = True
+                kwargs['saveZarr'] = True
+                kwargs['unmixFactors'] = pair['factors']
+                kwargs['channelInd'] = pair['channel_ind']
+                if background_paths:
+                    kwargs['FFImagePaths'] = [flatfield_paths[ci] for ci in pair_channel_indices]
+                    kwargs['backgroundPaths'] = [background_paths[ci] for ci in pair_channel_indices]
+
+                if pair_i == 0:
+                    if 'resultDirName' in dataset:
+                        folder_path = os.path.join(folder_path, dataset['resultDirName'])
+                    else:
+                        folder_path = os.path.join(folder_path, 'Chromatic_Shift_Corrected')
+
+                run_unmixing([folder_path], **kwargs)

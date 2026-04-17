@@ -18,15 +18,131 @@ import inspect
 import re
 from datetime import datetime
 import time
-from PyPetaKit5D import XR_chromatic_shift_correction_data_wrapper
-from PyPetaKit5D import XR_unmix_channels_data_wrapper
-from PyPetaKit5D import XR_decon_data_wrapper
-from PyPetaKit5D import XR_deskew_rotate_data_wrapper
+
+from tqdm import tqdm
+
+# NOTE: This largely maintains compatibility / is effectively unchanged from original version of ml-data-pipeline.
+# The changes are mainly to the metadata collection and preparation steps. The exceptions are for the following
+# parts to allow for arbitrary channel patterns etc:
+# -
+# - (FILL IN)
+# - 
 
 
-def create_zarr_spec(zarr_version, path, data_shape, cube_shape, chunk_shape, num_timepoints_per_image):
+OCCUPANCY_CHUNK_FIELDS = ["occ_ratio", "histogram"]
+
+SUPPORT_RATIO_CHUNK_FIELDS = [
+    "FFTratio_mean",
+    "FFTratio_median",
+    "FFTratio_sd",
+    "embedding_sd",
+    "OTF_embedding_sum",
+    "OTF_embedding_vol",
+    "OTF_embedding_normIntegral",
+    "moment_OTF_embedding_sum",
+    "moment_OTF_embedding_ideal_sum",
+    "moment_OTF_embedding_norm",
+    "integratedPhotons",
+]
+
+
+def merge_existing_metadata(
+    datasets,
+    required_chunk_fields: list[str] | None = None,
+):
+    """Merge chunk-level metadata from an existing metadata.json back into the
+    freshly rebuilt metadata skeleton.
+
+    Used for the 'metadata insert only' path where processed zarrs already exist
+    and we want to rebuild/validate metadata without rerunning processing jobs.
+    """
+    required_chunk_fields = required_chunk_fields or []
+
+    for folder_path, dataset in tqdm(
+        datasets.items(),
+        total=len(datasets),
+        desc="Merge existing metadata",
+        unit="roi",
+    ):
+        metadata = dataset.get("metadata", {})
+        output_folder = metadata.get("output_folder")
+        if not output_folder:
+            raise ValueError(
+                f"{folder_path}: metadata has no output_folder before merge_existing_metadata()"
+            )
+
+        metadata_path = os.path.join(os.path.normpath(output_folder), "metadata.json")
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(
+                f"{folder_path}: expected existing metadata file at {metadata_path}"
+            )
+
+        with open(metadata_path, "r") as f:
+            existing_metadata = json.load(f)
+
+        existing_training_images = existing_metadata.get("training_images")
+        if not existing_training_images:
+            raise ValueError(
+                f"{folder_path}: existing metadata.json has no training_images"
+            )
+
+        if "elapsed_sec" in existing_metadata:
+            metadata["elapsed_sec"] = existing_metadata["elapsed_sec"]
+        if "software_version" in existing_metadata:
+            metadata["software_version"] = existing_metadata["software_version"]
+
+        for tile_name, tile_meta in metadata.get("training_images", {}).items():
+            if tile_name not in existing_training_images:
+                raise KeyError(
+                    f"{folder_path}: tile {tile_name!r} missing from existing metadata.json"
+                )
+
+            existing_tile_meta = existing_training_images[tile_name]
+
+            if tile_meta.get("bbox") != existing_tile_meta.get("bbox"):
+                raise ValueError(
+                    f"{folder_path}: bbox mismatch for tile {tile_name!r}. "
+                    f"rebuilt={tile_meta.get('bbox')} existing={existing_tile_meta.get('bbox')}"
+                )
+
+            existing_chunks = existing_tile_meta.get("chunk_names", {})
+            for chunk_name, chunk_meta in tile_meta.get("chunk_names", {}).items():
+                if chunk_name not in existing_chunks:
+                    raise KeyError(
+                        f"{folder_path}: chunk {chunk_name!r} missing from existing "
+                        f"metadata.json for tile {tile_name!r}"
+                    )
+
+                existing_chunk_meta = existing_chunks[chunk_name]
+
+                if chunk_meta.get("bbox") != existing_chunk_meta.get("bbox"):
+                    raise ValueError(
+                        f"{folder_path}: bbox mismatch for chunk {chunk_name!r} "
+                        f"in tile {tile_name!r}. "
+                        f"rebuilt={chunk_meta.get('bbox')} "
+                        f"existing={existing_chunk_meta.get('bbox')}"
+                    )
+
+                for key, value in existing_chunk_meta.items():
+                    if key == "bbox":
+                        continue
+                    chunk_meta[key] = copy.deepcopy(value)
+
+                missing_fields = [
+                    k for k in required_chunk_fields if k not in chunk_meta
+                ]
+                if missing_fields:
+                    raise ValueError(
+                        f"{folder_path}: chunk {chunk_name!r} in tile {tile_name!r} "
+                        f"is missing required metadata fields after merge: {missing_fields}"
+                    )
+
+    return datasets
+
+
+def create_zarr_spec(zarr_version, path, data_shape, cube_shape, chunk_shape, num_timepoints_per_image, n_channels):
     if zarr_version == 'zarr3':
-        shard_shape = [num_timepoints_per_image, cube_shape[0], cube_shape[1], cube_shape[2], 2]
+        shard_shape = [num_timepoints_per_image, cube_shape[0], cube_shape[1], cube_shape[2], n_channels]
         zarr_spec = {
             'driver': zarr_version,
             'kvstore': {
@@ -100,11 +216,12 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
                          log_dir='', csc_unmixing=False, decon=False, dsr=False, background_path=None,
                          flatfield_path=None,
                          output_zarr_version='zarr3',
-                         outer_data_shape=None, data_shape=None, tile_filename='', timepoint_num=0):
+                         outer_data_shape=None, data_shape=None, tile_filename='', timepoint_num=0,
+                         chromatic_offset=None, unmix_pairs=None):
     extra_params = ''
     cpus_per_task = 4
     if python_script_name == 'convert_files.py':
-        extra_params = f'''--channel-patterns {channel_pattern} --channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-num {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} --output-zarr-version {output_zarr_version} '''
+        extra_params = f'''--channel-patterns {channel_pattern} --channel-num {channel_num} --input-file {input_file} --output-folder {output_folder} --output-name-start-number {output_name_start_num} --batch-start-number {batch_start_number} --batch-size {batch_size} --elapsed-sec {elapsed_sec} --output-zarr-version {output_zarr_version} '''
         if tiled:
             extra_params += '--tiled '
         if input_is_zarr:
@@ -126,6 +243,10 @@ def create_sbatch_script(python_script_name, input_file, folder_path, channel_pa
             extra_params += '--csc-unmixing '
         if background_path:
             extra_params += f'--background-paths {background_path} --flatfield-paths {flatfield_path} '
+        if chromatic_offset is not None:
+            extra_params += f"--chromatic-offset '{json.dumps(chromatic_offset)}' "
+        if unmix_pairs is not None:
+            extra_params += f"--unmix-pairs '{json.dumps(unmix_pairs)}' "
     elif python_script_name == 'decon_dsr.py':
         cpus_per_task = 2
         extra_params = f'''--channel-patterns {channel_pattern} '''
@@ -170,12 +291,13 @@ def create_file_conversion_sbatch_script(input_file, folder_path, channel_patter
 
 
 def create_csc_unmixing_sbatch_script(input_file, folder_path, channel_pattern, csc_unmixing, background_path,
-                                      flatfield_path, log_dir):
+                                      flatfield_path, log_dir, chromatic_offset=None, unmix_pairs=None):
     if csc_unmixing is None:
         csc_unmixing = False
 
     return create_sbatch_script('csc_unmixing.py', input_file, folder_path, channel_pattern, csc_unmixing=csc_unmixing,
-                                background_path=background_path, flatfield_path=flatfield_path, log_dir=log_dir)
+                                background_path=background_path, flatfield_path=flatfield_path, log_dir=log_dir,
+                                chromatic_offset=chromatic_offset, unmix_pairs=unmix_pairs)
 
 
 def create_decon_dsr_sbatch_script(input_file, folder_path, channel_pattern, csc_unmixing, decon, dsr, background_path,
@@ -203,75 +325,32 @@ def get_cycle_ms_from_json(file_path):
         return json.load(f)['Camera']['Actual']['Cycle (ms)']
 
 
-if __name__ == '__main__':
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--input-file', type=str, required=True,
-                    help="Path to the json file containing dataset information")
-    ap.add_argument('--output-folder', type=str, required=True,
-                    help="Path to the folder to output the images to")
-    ap.add_argument('--log-dir', type=str, required=True,
-                    help="Path to the folder to output the job logs to")
-    ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[128, 128, 128],
-                    help="Data shape for the 3D Cube")
-    ap.add_argument('--num-timepoints-per-image', type=int, default=16,
-                    help="Number of timepoints in a training image")
-    ap.add_argument('--matlab-batch-size', type=int, default=2,
-                    help="How many Matlab function calls to run in a Matlab session")
-    ap.add_argument("--add-support-ratio-metadata", action="store_true", help="Run the support ratio processing")
-    ap.add_argument('--output-zarr-version', type=str, default='zarr3',
-                    help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
-    ap.add_argument('--background-folder', type=str,
-                    default='/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/averaged',
-                    help="Path to the folder containing the background files")
-    args = ap.parse_args()
-    input_file = args.input_file
-    output_folder = args.output_folder
-    log_dir = args.log_dir
-    data_shape = args.data_shape
-    inner_chunk_shape = [1, 32, 32, 32]
-    batch_size = args.num_timepoints_per_image
-    matlab_batch_size = args.matlab_batch_size
-    add_support_ratio_metadata = args.add_support_ratio_metadata
-    output_zarr_version = args.output_zarr_version
-    background_folder = args.background_folder
-    data_shape.insert(0, batch_size)
-    date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
+def submit_csc_unmixing_jobs(datasets, batch_size, input_file, background_folder, log_dir, valid_params):
+    """Submit CSC/unmixing Slurm jobs for datasets that require it.
+
+    Returns (csc_unmixing_job_times: dict, modified datasets).
+    """
     run_csc_unmixing = False
     csc_unmixing_jobs = {}
     csc_unmixing_job_start_times = {}
     csc_unmixing_job_times = {}
-    run_decon_dsr = False
-    decon_dsr_jobs = {}
-    decon_dsr_job_start_times = {}
-    decon_dsr_job_times = {}
-
-    with open(input_file) as f:
-        datasets = json.load(f)
-
-    with open(inspect.getfile(XR_chromatic_shift_correction_data_wrapper), "r", encoding="utf-8") as f:
-        decon_dsr_text = f.read()
-
-    with open(inspect.getfile(XR_unmix_channels_data_wrapper), "r", encoding="utf-8") as f:
-        decon_dsr_text += f.read()
-
-    with open(inspect.getfile(XR_decon_data_wrapper), "r", encoding="utf-8") as f:
-        decon_dsr_text += f.read()
-
-    with open(inspect.getfile(XR_deskew_rotate_data_wrapper), "r", encoding="utf-8") as f:
-        decon_dsr_text += f.read()
-
-    matches = re.findall(r'"(.*?)": \[', decon_dsr_text)
-    valid_params = {key: True for key in matches}
 
     csc_unmixing_time = time.time()
     for folder_path, dataset in datasets.items():
         if dataset.get('csc_unmixing'):
             run_csc_unmixing = True
+
+            profile_fields = ["csc_unmixing", "decon", "dsr", "chromatic_offset",
+                              "unmix_pairs", "flatfield_paths", "background_folder",
+                              "channelPatterns"]
             for param, value in dataset.items():
-                if param == 'csc_unmixing' or param == 'decon' or param == 'dsr':
+                if param in profile_fields:
                     continue
                 if param not in valid_params:
                     raise SystemExit(f'{param} is not a valid parameter for PetaKit5D!')
+
+            chromatic_offset = dataset.get('chromatic_offset')
+            unmix_pairs = dataset.get('unmix_pairs')
 
             for i in range(0, len(dataset['channelPatterns']), 2):
                 first_channel_pattern = dataset['channelPatterns'][i]
@@ -286,34 +365,46 @@ if __name__ == '__main__':
                         f'Not enough files in {folder_path} for channel pattern \'{first_channel_pattern}\'!\n'
                         f'Found {file_count} files and the batch size is {batch_size}.')
                 datasets[folder_path]['input_is_zarr'] = True
+
+                profile_flatfield = dataset.get('flatfield_paths')
+                profile_bg_folder = dataset.get('background_folder', background_folder)
+
                 background_paths = None
                 flatfield_paths = None
                 # Set the background paths if they are not set already
                 if 'FFCorrection' in dataset and ('backgroundPaths' not in dataset or not dataset['backgroundPaths']):
-                    flatfield_paths = '/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif,/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif'
-
+                    if profile_flatfield:
+                        flatfield_paths = ','.join(profile_flatfield)
+                    else:
+                        raise SystemExit(
+                            f'FFCorrection requested for {folder_path} but no flatfield_paths '
+                            f'in preprocessing profile and no backgroundPaths in dataset.'
+                        )
 
                     def get_background_path(channel_pattern):
                         first_json = glob.glob(f'{folder_path}/*JSONsettings*.json')[0]
                         cycle_ms = get_cycle_ms_from_json(first_json)
                         background_channel_pattern = re.search(r'Cam[A-Z]', channel_pattern).group(0)
                         background_cycle_ms_file_list = glob.glob(
-                            f'{background_folder}/*{background_channel_pattern}*.json')
+                            f'{profile_bg_folder}/*{background_channel_pattern}*.json')
                         background_cycle_ms_diff_list = []
                         for file in background_cycle_ms_file_list:
                             background_cycle_ms_diff_list.append(abs(get_cycle_ms_from_json(file) - cycle_ms))
                         background_path_json = background_cycle_ms_file_list[
                             background_cycle_ms_diff_list.index(min(background_cycle_ms_diff_list))]
                         cycle_ms_pattern = os.path.basename(background_path_json).replace('_JSONsettings.json', '')
-                        return glob.glob(f'{background_folder}/*{cycle_ms_pattern}*.tif')[0]
-
+                        return glob.glob(f'{profile_bg_folder}/*{cycle_ms_pattern}*.tif')[0]
 
                     background_paths = f'{get_background_path(first_channel_pattern)},{get_background_path(second_channel_pattern)}'
 
-                script = create_csc_unmixing_sbatch_script(input_file, folder_path,
-                                                           f'{first_channel_pattern},{second_channel_pattern}',
-                                                           dataset.get('csc_unmixing'), background_paths, flatfield_paths,
-                                                           log_dir)
+                script = create_csc_unmixing_sbatch_script(
+                    input_file, folder_path,
+                    f'{first_channel_pattern},{second_channel_pattern}',
+                    dataset.get('csc_unmixing'), background_paths, flatfield_paths,
+                    log_dir,
+                    chromatic_offset=chromatic_offset,
+                    unmix_pairs=unmix_pairs,
+                )
                 key = f'Folder: {folder_path} Channel: {first_channel_pattern},{second_channel_pattern}'
                 csc_unmixing_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
                                                  stdout=subprocess.PIPE,
@@ -335,6 +426,19 @@ if __name__ == '__main__':
                     running_csc_unmixing_jobs.discard(key)
             time.sleep(1)
         print(f'All CSC/Unmixing jobs finished in {time.time() - csc_unmixing_time} seconds!')
+
+    return csc_unmixing_job_times
+
+
+def submit_decon_dsr_jobs(datasets, batch_size, valid_params, input_file, log_dir):
+    """Submit decon/DSR Slurm jobs for datasets that require it.
+
+    Returns decon_dsr_job_times: dict.
+    """
+    run_decon_dsr = False
+    decon_dsr_jobs = {}
+    decon_dsr_job_start_times = {}
+    decon_dsr_job_times = {}
 
     decon_dsr_time = time.time()
     for folder_path, dataset in datasets.items():
@@ -386,6 +490,90 @@ if __name__ == '__main__':
             time.sleep(1)
         print(f'All Decon/DSR jobs finished in {time.time() - decon_dsr_time} seconds!')
 
+    return decon_dsr_job_times
+
+
+_DEFAULT_CUBE_SIZE = 128
+def build_metadata_from_existing(datasets, output_folder, date_ymd):
+    """Metadata-only path for --skip-processing mode.
+
+    Reads each ROI's on-disk ``metadata.json`` (produced by a previous
+    processing run) and builds the minimum skeleton required by
+    :func:`build_prepared_entry`, :func:`build_prepared_tiles_entries`, and
+    :func:`build_prepared_cubes_entries`: ``training_images[tile].bbox`` and
+    ``training_images[tile].chunk_names[name].bbox``.  Per-chunk stats
+    (``occ_ratio``, ``histogram``, support-ratio fields) are copied in later
+    by :func:`merge_existing_metadata`.
+
+    Raises FileNotFoundError / ValueError on any missing input so failures are
+    loud rather than silent.  Returns (datasets, folders_to_delete=[]) to keep
+    the same shape as :func:`submit_training_image_jobs`.
+    """
+    try:
+        sw_version = f'PyPetaKit5D {version("PyPetaKit5D")}'
+    except Exception:
+        sw_version = "PyPetaKit5D (unknown)"
+
+    for folder_path, dataset in tqdm(
+        datasets.items(),
+        total=len(datasets),
+        desc="Build metadata (skip-processing)",
+        unit="roi",
+    ):
+        metadata = dataset.copy()
+        metadata['input_folder'] = folder_path
+        folder_3 = os.path.basename(folder_path)
+        folder_2 = os.path.basename(os.path.dirname(folder_path))
+        folder_1 = os.path.basename(os.path.dirname(os.path.dirname(folder_path)))
+        out = str(os.path.join(output_folder, *date_ymd, folder_1, folder_2, folder_3))
+        metadata['output_folder'] = out
+        metadata['software_version'] = sw_version
+        metadata['training_images'] = {}
+
+        existing_path = os.path.join(out, "metadata.json")
+        if not os.path.exists(existing_path):
+            raise FileNotFoundError(
+                f"--skip-processing: expected existing metadata at {existing_path}"
+            )
+        with open(existing_path) as f:
+            existing = json.load(f)
+
+        if not existing.get("training_images"):
+            raise ValueError(
+                f"{existing_path} has no 'training_images' — cannot ingest"
+            )
+
+        metadata["cube_size"] = existing.get("cube_size", _DEFAULT_CUBE_SIZE)
+
+        for tile_name, tile_meta in existing["training_images"].items():
+            if "bbox" not in tile_meta:
+                raise ValueError(
+                    f"{existing_path}: tile {tile_name!r} missing 'bbox'"
+                )
+            chunks = {}
+            for chunk_name, chunk_meta in tile_meta.get("chunk_names", {}).items():
+                if "bbox" not in chunk_meta:
+                    raise ValueError(
+                        f"{existing_path}: chunk {chunk_name!r} in tile "
+                        f"{tile_name!r} missing 'bbox'"
+                    )
+                chunks[chunk_name] = {"bbox": chunk_meta["bbox"]}
+            metadata['training_images'][tile_name] = {
+                "bbox": tile_meta["bbox"],
+                "chunk_names": chunks,
+            }
+
+        dataset['metadata'] = metadata
+
+    return datasets, []
+
+
+def submit_training_image_jobs(datasets, output_folder, data_shape, inner_chunk_shape, batch_size,
+                                date_ymd, output_zarr_version, input_file, log_dir, decon_dsr_job_times):
+    """Submit training image creation Slurm jobs.
+
+    Returns (datasets with metadata populated, folders_to_delete list).
+    """
     training_image_jobs = {}
     folders_to_delete = []
     elapsed_sec = 0
@@ -462,13 +650,13 @@ if __name__ == '__main__':
         else:
             channel_patterns = channel_patterns_copy
             tiled = False
-        num_orig_patterns = int(len(channel_patterns_copy))
+        n_channels = len(channel_patterns_copy)
         curr_channel = -1
         orig_channel_patterns = {}
         zarr_channel_pattern = ''
         curr_data_shape = copy.deepcopy(data_shape)
         curr_chunk_shape = copy.deepcopy(inner_chunk_shape)
-        curr_chunk_shape.append(2)
+        curr_chunk_shape.append(n_channels)
         for channel_pattern in dataset['channelPatterns']:
             orig_channel_pattern = copy.deepcopy(channel_pattern)
             if tiled:
@@ -505,7 +693,7 @@ if __name__ == '__main__':
                     x_max = max(x_max, bbox[5])
                 curr_data_shape = [z_max - z_min, y_max - y_min, x_max - x_min]
                 curr_data_shape.insert(0, num_images_per_dataset * batch_size)
-                curr_data_shape.append(num_orig_patterns)
+                curr_data_shape.append(n_channels)
                 metadata['time_size'] = curr_data_shape[0]
                 metadata['channel_size'] = curr_data_shape[4]
 
@@ -514,10 +702,13 @@ if __name__ == '__main__':
                 zarr_channel_pattern = f'{channel_pattern.split("*", 1)[1]}.zarr'
             if not zarr_channel_pattern in zarr_channel_patterns:
                 zarr_channel_patterns[zarr_channel_pattern] = True
-                zarr_spec = create_zarr_spec(output_zarr_version,
-                                             os.path.join(os.path.normpath(metadata['output_folder']),
-                                                          zarr_channel_pattern),
-                                             curr_data_shape, data_shape[1:], curr_chunk_shape, batch_size)
+                zarr_spec = create_zarr_spec(
+                    output_zarr_version,
+                    os.path.join(os.path.normpath(metadata['output_folder']),
+                                 zarr_channel_pattern),
+                    curr_data_shape, data_shape[1:], curr_chunk_shape, batch_size,
+                    n_channels=n_channels,
+                )
                 ts.open(zarr_spec).result()
 
             batch_start_number = 0
@@ -527,16 +718,19 @@ if __name__ == '__main__':
             filenames = get_filenames(orig_folder_path, channel_pattern, input_is_zarr_filenames)
             metadata['elapsed_sec'] = elapsed_sec
             for i in range(num_images_per_dataset):
-                script = create_file_conversion_sbatch_script(input_file, folder_path, channel_pattern, tiled,
-                                                              curr_channel, output_folder,
-                                                              (i * num_chunks_per_image), i * batch_size,
-                                                              batch_size, dataset.get('input_is_zarr'), date_ymd,
-                                                              elapsed_sec, orig_folder_path, output_zarr_version,
-                                                              curr_data_shape, data_shape, log_dir)
+                script = create_file_conversion_sbatch_script(
+                    input_file, folder_path, channel_pattern, tiled,
+                    curr_channel, output_folder,
+                    (i * num_chunks_per_image), i * batch_size,
+                    batch_size, dataset.get('input_is_zarr'), date_ymd,
+                    elapsed_sec, orig_folder_path, output_zarr_version,
+                    curr_data_shape, data_shape, log_dir,
+                )
                 key = f'Folder: {folder_path} Timepoint: {i} Channel: {channel_pattern}'
-                training_image_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                      stdout=subprocess.PIPE,
-                                                      stderr=subprocess.PIPE)
+                training_image_job = subprocess.Popen(
+                    ['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                )
                 training_image_job.stdin.write(script)
                 training_image_job.stdin.close()
                 training_image_jobs[key] = training_image_job
@@ -580,7 +774,11 @@ if __name__ == '__main__':
         time.sleep(1)
     print(f'All Training image creation jobs finished in {time.time() - training_image_time} seconds!')
 
-    # Get occ ratios
+    return datasets, folders_to_delete
+
+
+def collect_occupancy_metadata(datasets):
+    """Read occupancy ratio JSON files produced by convert_files and merge into metadata."""
     print('Collecting occupancy ratios')
     occ_ratios_time = time.time()
     for folder_path, dataset in datasets.items():
@@ -600,127 +798,209 @@ if __name__ == '__main__':
                     except (json.JSONDecodeError, FileNotFoundError) as e:
                         print(f"Error reading {file_path}: {e}")
     print(f'All occupancy ratios collected in {time.time() - occ_ratios_time} seconds!')
+    return datasets
 
-    # Matlab support ratio processing
-    if add_support_ratio_metadata:
-        support_ratio_jobs = {}
-        support_ratio_time = time.time()
-        training_image = ''
-        chunk_i = '0'
-        channel_i = 0
-        if output_zarr_version == 'zarr3':
-            delimiter = '/'
-        else:
-            delimiter = '.'
-        for folder_path, dataset in datasets.items():
-            curr_matlab_func = 0
-            matlab_func_str = ''
-            for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
-                training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
-                for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
-                    if output_zarr_version == 'zarr3':
-                        split_chunk_name = chunk_name.split(delimiter)[1:]
-                    else:
-                        split_chunk_name = chunk_name.split(delimiter)
-                    chunk_i = split_chunk_name[0]
-                    timepoint_i = split_chunk_name[1]
-                    channel_i = int(split_chunk_name[5])
-                    if chunk_name_dict['occ_ratio'] == 0:
-                        chunk_name_dict['FFTratio_mean'] = 0
-                        chunk_name_dict['FFTratio_median'] = 0
-                        chunk_name_dict['FFTratio_sd'] = 0
-                        chunk_name_dict['embedding_sd'] = 0
-                        chunk_name_dict['OTF_embedding_sum'] = 0
-                        chunk_name_dict['OTF_embedding_vol'] = 0
-                        chunk_name_dict['OTF_embedding_normIntegral'] = 0
-                        chunk_name_dict['moment_OTF_embedding_sum'] = 0
-                        chunk_name_dict['moment_OTF_embedding_ideal_sum'] = 0
-                        chunk_name_dict['moment_OTF_embedding_norm'] = 0
-                        chunk_name_dict['integratedPhotons'] = 0
-                        continue
-                    psf_full_path = datasets[folder_path]['metadata']['psfFullpaths'][channel_i]
-                    if datasets[folder_path]['metadata'].get('dsr'):
-                        psf_full_path = os.path.join(os.path.dirname(psf_full_path), "DSR",
-                                                     os.path.basename(psf_full_path))
-                    matlab_func_str += create_matlab_func(training_image,
-                                                          psf_full_path,
-                                                          chunk_i, timepoint_i, channel_i, output_zarr_version,
-                                                          datasets[folder_path]['metadata']['xyPixelSize'],
-                                                          datasets[folder_path]['metadata']['dz'])
-                    curr_matlab_func += 1
-                    if curr_matlab_func == matlab_batch_size:
-                        script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-                        key = f'{training_image},{chunk_i},{channel_i}'
-                        support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                             stdout=subprocess.PIPE,
-                                                             stderr=subprocess.PIPE)
+def collect_support_ratio_metadata(datasets, matlab_batch_size, output_zarr_version, log_dir):
+    """Submit Matlab support ratio jobs, wait, and merge results into metadata."""
+    support_ratio_jobs = {}
+    support_ratio_time = time.time()
+    training_image = ''
+    chunk_i = '0'
+    channel_i = 0
+    if output_zarr_version == 'zarr3':
+        delimiter = '/'
+    else:
+        delimiter = '.'
+    for folder_path, dataset in datasets.items():
+        curr_matlab_func = 0
+        matlab_func_str = ''
+        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+            training_image = os.path.join(datasets[folder_path]['metadata']['output_folder'], zarr_filename)
+            for chunk_name, chunk_name_dict in training_images['chunk_names'].items():
+                if output_zarr_version == 'zarr3':
+                    split_chunk_name = chunk_name.split(delimiter)[1:]
+                else:
+                    split_chunk_name = chunk_name.split(delimiter)
+                chunk_i = split_chunk_name[0]
+                timepoint_i = split_chunk_name[1]
+                channel_i = int(split_chunk_name[5])
+                if chunk_name_dict['occ_ratio'] == 0:
+                    chunk_name_dict['FFTratio_mean'] = 0
+                    chunk_name_dict['FFTratio_median'] = 0
+                    chunk_name_dict['FFTratio_sd'] = 0
+                    chunk_name_dict['embedding_sd'] = 0
+                    chunk_name_dict['OTF_embedding_sum'] = 0
+                    chunk_name_dict['OTF_embedding_vol'] = 0
+                    chunk_name_dict['OTF_embedding_normIntegral'] = 0
+                    chunk_name_dict['moment_OTF_embedding_sum'] = 0
+                    chunk_name_dict['moment_OTF_embedding_ideal_sum'] = 0
+                    chunk_name_dict['moment_OTF_embedding_norm'] = 0
+                    chunk_name_dict['integratedPhotons'] = 0
+                    continue
+                psf_full_path = datasets[folder_path]['metadata']['psfFullpaths'][channel_i]
+                if datasets[folder_path]['metadata'].get('dsr'):
+                    psf_full_path = os.path.join(os.path.dirname(psf_full_path), "DSR",
+                                                 os.path.basename(psf_full_path))
+                matlab_func_str += create_matlab_func(training_image,
+                                                      psf_full_path,
+                                                      chunk_i, timepoint_i, channel_i, output_zarr_version,
+                                                      datasets[folder_path]['metadata']['xyPixelSize'],
+                                                      datasets[folder_path]['metadata']['dz'])
+                curr_matlab_func += 1
+                if curr_matlab_func == matlab_batch_size:
+                    script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-                        support_ratio_job.stdin.write(script)
-                        support_ratio_job.stdin.close()
-                        support_ratio_jobs[key] = support_ratio_job
-                        curr_matlab_func = 0
-                        matlab_func_str = ''
-            if curr_matlab_func > 0:
-                script = create_sbatch_matlab_script(matlab_func_str, log_dir)
+                    key = f'{training_image},{chunk_i},{channel_i}'
+                    support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                         stdout=subprocess.PIPE,
+                                                         stderr=subprocess.PIPE)
 
-                key = f'{training_image},{chunk_i},{channel_i}'
-                support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
-                                                     stdout=subprocess.PIPE,
-                                                     stderr=subprocess.PIPE)
+                    support_ratio_job.stdin.write(script)
+                    support_ratio_job.stdin.close()
+                    support_ratio_jobs[key] = support_ratio_job
+                    curr_matlab_func = 0
+                    matlab_func_str = ''
+        if curr_matlab_func > 0:
+            script = create_sbatch_matlab_script(matlab_func_str, log_dir)
 
-                support_ratio_job.stdin.write(script)
-                support_ratio_job.stdin.close()
-                support_ratio_jobs[key] = support_ratio_job
+            key = f'{training_image},{chunk_i},{channel_i}'
+            support_ratio_job = subprocess.Popen(['sbatch', '--wait'], stdin=subprocess.PIPE, text=True,
+                                                 stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE)
 
-        print('Waiting for Support Ratio jobs to finish')
-        running_support_ratio_jobs = set(support_ratio_jobs.keys())
-        while running_support_ratio_jobs:
-            running_support_ratio_jobs_copy = copy.deepcopy(running_support_ratio_jobs)
-            for key in running_support_ratio_jobs_copy:
-                if support_ratio_jobs[key].poll() is not None:
-                    running_support_ratio_jobs.discard(key)
-            time.sleep(1)
-        print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
+            support_ratio_job.stdin.write(script)
+            support_ratio_job.stdin.close()
+            support_ratio_jobs[key] = support_ratio_job
 
-        # Get support ratios
-        print('Collecting Support Ratio metadata')
-        support_ratio_metadata_time = time.time()
-        for folder_path, dataset in datasets.items():
-            for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
-                zarr_filename = zarr_filename[:-5]
-                support_ratio_dict = None
-                for filename in os.listdir(datasets[folder_path]['metadata']['output_folder']):
-                    if filename.endswith(".json") and zarr_filename in filename:
-                        file_path = os.path.join(datasets[folder_path]['metadata']['output_folder'], filename)
-                        try:
-                            with open(file_path, "r") as f:
-                                support_ratio_dict = json.load(f)
-                            for chunk_name, support_ratio in support_ratio_dict.items():
-                                training_images['chunk_names'][chunk_name].update(support_ratio)
-                            os.remove(file_path)
-                        except (json.JSONDecodeError, FileNotFoundError) as e:
-                            print(f"Error reading {file_path}: {e}")
-        print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')
+    print('Waiting for Support Ratio jobs to finish')
+    running_support_ratio_jobs = set(support_ratio_jobs.keys())
+    while running_support_ratio_jobs:
+        running_support_ratio_jobs_copy = copy.deepcopy(running_support_ratio_jobs)
+        for key in running_support_ratio_jobs_copy:
+            if support_ratio_jobs[key].poll() is not None:
+                running_support_ratio_jobs.discard(key)
+        time.sleep(1)
+    print(f'All Support Ratio jobs finished in {time.time() - support_ratio_time} seconds!')
 
-    # Write out the metadata
+    print('Collecting Support Ratio metadata')
+    support_ratio_metadata_time = time.time()
+    for folder_path, dataset in datasets.items():
+        for zarr_filename, training_images in datasets[folder_path]['metadata']['training_images'].items():
+            zarr_filename = zarr_filename[:-5]
+            support_ratio_dict = None
+            for filename in os.listdir(datasets[folder_path]['metadata']['output_folder']):
+                if filename.endswith(".json") and zarr_filename in filename:
+                    file_path = os.path.join(datasets[folder_path]['metadata']['output_folder'], filename)
+                    try:
+                        with open(file_path, "r") as f:
+                            support_ratio_dict = json.load(f)
+                        for chunk_name, support_ratio in support_ratio_dict.items():
+                            training_images['chunk_names'][chunk_name].update(support_ratio)
+                        os.remove(file_path)
+                    except (json.JSONDecodeError, FileNotFoundError) as e:
+                        print(f"Error reading {file_path}: {e}")
+    print(f'All Support Ratio metadata collected in {time.time() - support_ratio_metadata_time} seconds!')
+
+    return datasets
+
+
+def write_metadata_files(datasets):
+    """Write out the final metadata JSON files."""
     print('Writing out the metadata')
     metadata_write_time = time.time()
     for folder_path, dataset in datasets.items():
-        output_folder = datasets[folder_path]['metadata']['output_folder']
-        match = re.search(r'(/\d+/\d{1,2}/\d{1,2}/)', output_folder)
+        out_folder = datasets[folder_path]['metadata']['output_folder']
+        match = re.search(r'(/\d+/\d{1,2}/\d{1,2}/)', out_folder)
         if match:
             split_index = match.start(1)
-            datasets[folder_path]['metadata']['server_folder'] = output_folder[:split_index]
-            datasets[folder_path]['metadata']['output_folder'] = output_folder[split_index:].lstrip('/')
-        #metadata_object = orjson.dumps(datasets[folder_path]['metadata'], indent=4, sort_keys=True)
+            datasets[folder_path]['metadata']['server_folder'] = out_folder[:split_index]
+            datasets[folder_path]['metadata']['output_folder'] = out_folder[split_index:].lstrip('/')
         metadata_object = orjson.dumps(datasets[folder_path]['metadata'],
                                        option=orjson.OPT_SORT_KEYS | orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS)
         with open(
                 f'{os.path.normpath(os.path.join(datasets[folder_path]["metadata"]["server_folder"], datasets[folder_path]["metadata"]["output_folder"], "metadata"))}.json',
                 'wb') as outfile:
             outfile.write(metadata_object)
-    print(f'All metadata writton out in {time.time() - metadata_write_time} seconds!')
+    print(f'All metadata written out in {time.time() - metadata_write_time} seconds!')
+    return datasets
+
+
+if __name__ == '__main__':
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--input-file', type=str, required=True,
+                    help="Path to the json file containing dataset information")
+    ap.add_argument('--output-folder', type=str, required=True,
+                    help="Path to the folder to output the images to")
+    ap.add_argument('--log-dir', type=str, required=True,
+                    help="Path to the folder to output the job logs to")
+    ap.add_argument('--data-shape', type=lambda s: list(map(int, s.split(','))), default=[128, 128, 128],
+                    help="Data shape for the 3D Cube")
+    ap.add_argument('--num-timepoints-per-image', type=int, default=16,
+                    help="Number of timepoints in a training image")
+    ap.add_argument('--matlab-batch-size', type=int, default=2,
+                    help="How many Matlab function calls to run in a Matlab session")
+    ap.add_argument("--add-support-ratio-metadata", action="store_true", help="Run the support ratio processing")
+    ap.add_argument('--output-zarr-version', type=str, default='zarr3',
+                    help="Zarr version to use for output zarr files. Valid values: zarr or zarr3")
+    ap.add_argument('--background-folder', type=str,
+                    default='/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/averaged',
+                    help="Path to the folder containing the background files")
+    args = ap.parse_args()
+    input_file = args.input_file
+    output_folder = args.output_folder
+    log_dir = args.log_dir
+    data_shape = args.data_shape
+    inner_chunk_shape = [1, 32, 32, 32]
+    batch_size = args.num_timepoints_per_image
+    matlab_batch_size = args.matlab_batch_size
+    add_support_ratio_metadata = args.add_support_ratio_metadata
+    output_zarr_version = args.output_zarr_version
+    background_folder = args.background_folder
+    data_shape.insert(0, batch_size)
+    date_ymd = [str(datetime.now().year), str(datetime.now().month), str(datetime.now().day)]
+
+    with open(input_file) as f:
+        datasets = json.load(f)
+
+    from PyPetaKit5D import (
+        XR_chromatic_shift_correction_data_wrapper,
+        XR_unmix_channels_data_wrapper,
+        XR_decon_data_wrapper,
+        XR_deskew_rotate_data_wrapper,
+    )
+    with open(inspect.getfile(XR_chromatic_shift_correction_data_wrapper), "r", encoding="utf-8") as f:
+        decon_dsr_text = f.read()
+    with open(inspect.getfile(XR_unmix_channels_data_wrapper), "r", encoding="utf-8") as f:
+        decon_dsr_text += f.read()
+    with open(inspect.getfile(XR_decon_data_wrapper), "r", encoding="utf-8") as f:
+        decon_dsr_text += f.read()
+    with open(inspect.getfile(XR_deskew_rotate_data_wrapper), "r", encoding="utf-8") as f:
+        decon_dsr_text += f.read()
+    matches = re.findall(r'"(.*?)": \[', decon_dsr_text)
+    valid_params = {key: True for key in matches}
+
+    csc_unmixing_job_times = submit_csc_unmixing_jobs(
+        datasets, batch_size, input_file, background_folder, log_dir, valid_params
+    )
+
+    decon_dsr_job_times = submit_decon_dsr_jobs(
+        datasets, batch_size, valid_params, input_file, log_dir
+    )
+
+    datasets, folders_to_delete = submit_training_image_jobs(
+        datasets, output_folder, data_shape, inner_chunk_shape, batch_size,
+        date_ymd, output_zarr_version, input_file, log_dir, decon_dsr_job_times
+    )
+
+    datasets = collect_occupancy_metadata(datasets)
+
+    if add_support_ratio_metadata:
+        datasets = collect_support_ratio_metadata(
+            datasets, matlab_batch_size, output_zarr_version, log_dir
+        )
+
+    datasets = write_metadata_files(datasets)
 
     if folders_to_delete:
         print('Cleaning up intermediate results')

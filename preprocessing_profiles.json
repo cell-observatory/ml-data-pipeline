@@ -1,0 +1,34 @@
+{
+  "channel_aliases": {
+    "membrane": ["membrane"],
+    "histone": ["histone", "nucleus"],
+    "cytoplasm": ["cytoplasm", "cytosol"]
+  },
+  "profiles": [
+    {
+      "name": "korra_2cam_membrane_histone",
+      "match_channels": ["histone", "membrane"],
+      "match_roi_path_contains": null,
+      "csc_unmixing": {
+        "chromatic_offset": [[0, 0, 0], [5, -12, -1]],
+        "unmix_pairs": [
+          {
+            "channel_indices": [0, 1],
+            "factors": [-0.112, 1],
+            "channel_ind": 2
+          },
+          {
+            "channel_indices": [0],
+            "factors": [1],
+            "channel_ind": 1
+          }
+        ]
+      },
+      "flatfield_paths": [
+        "/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif",
+        "/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/ff_1.tif"
+      ],
+      "background_folder": "/clusterfs/nvme2/Data/20240911_Korra_Foundation/background/averaged"
+    }
+  ]
+}

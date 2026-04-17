@@ -1,0 +1,15 @@
+connectorx
+cpp-tiff
+numpy
+orjson
+pandas
+psycopg[binary]
+PyPetaKit5D
+pyarrow
+python-dotenv
+scikit-image
+scipy
+supabase
+tensorstore
+tqdm
+zarr
