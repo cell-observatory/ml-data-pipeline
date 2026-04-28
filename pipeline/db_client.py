@@ -26,6 +26,15 @@ _ENV_KEYS = {
     "prod": "SUPABASE_PROD_URI",
 }
 
+# Optional direct-Postgres write URIs for staging/prod. When set, long-running
+# operations (e.g. refresh_prepared_cache_artifacts) bypass Supabase's REST
+# gateway and run as ordinary SQL via the session pooler.
+# Format: postgresql://postgres.<project_ref>:<db_password>@<region>.pooler.supabase.com:<PORT>/postgres
+_PG_WRITE_ENV_KEYS = {
+    "staging": "SUPABASE_STAGING_PG_WRITE_URI",
+    "prod": "SUPABASE_PROD_PG_WRITE_URI",
+}
+
 
 def _resolve_local_pg_host() -> Optional[str]:
     explicit_host = os.environ.get("SUPABASE_LOCAL_HOST")
@@ -97,6 +106,13 @@ class PipelineDBClient:
         if self._write_backend == "supabase":
             self._supabase_url = supabase_url or os.environ.get("SUPABASE_URL", "")
             self._supabase_key = supabase_key or os.environ.get("SUPABASE_KEY", "")
+
+        # Optional direct-Postgres write URI for remote modes. Used to
+        # bypass Supabase's REST gateway timeout.
+        self._pg_write_uri_remote: Optional[str] = None
+        if self.mode in _PG_WRITE_ENV_KEYS:
+            uri = os.environ.get(_PG_WRITE_ENV_KEYS[self.mode]) or None
+            self._pg_write_uri_remote = uri
 
         if verbose:
             logger.info(
@@ -187,10 +203,21 @@ class PipelineDBClient:
         )
 
     def pg_write_connection(self):
-        """Return a psycopg connection for local SQL writes."""
-        if self._write_backend != "sql" or not self._write_uri:
-            raise ValueError("pg_write_connection() is only available for local mode")
-        return psycopg.connect(self._write_uri)
+        """Return a psycopg connection for SQL writes.
+
+        - mode='local': connects to the local sandbox via SUPABASE_LOCAL_URI.
+        - mode='staging' / 'prod': connects via SUPABASE_<MODE>_PG_WRITE_URI
+          (postgres role + DB password through the Supabase session pooler). 
+          Used for long-running operations.
+        """
+        if self._write_backend == "sql" and self._write_uri:
+            return psycopg.connect(self._write_uri, prepare_threshold=None)
+        if self._pg_write_uri_remote:
+            return psycopg.connect(self._pg_write_uri_remote, prepare_threshold=None)
+        env_hint = _PG_WRITE_ENV_KEYS.get(self.mode, "SUPABASE_LOCAL_URI")
+        raise ValueError(
+            f"pg_write_connection() requires {env_hint} for mode={self.mode!r}"
+        )
 
     def rpc(self, fn_name: str, params: dict):
         """Call a Supabase RPC function (e.g. refresh_prepared_cache_artifacts)."""

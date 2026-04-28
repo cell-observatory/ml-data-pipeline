@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import json
 import logging
 from typing import Any, Optional
 
@@ -47,7 +46,7 @@ def build_prepared_entry(
         "cube_size": cube_size,
         "time_size": n_timepoints,
         "channel_size": channel_size,
-        "channel_mapping": json.dumps(channel_mapping),
+        "channel_mapping": channel_mapping,
         "raw_roi_acquisition_id": roi_scan.roi_acquisition_id,
         "is_available": True,
     }
@@ -163,6 +162,7 @@ def build_prepared_cubes_entries(
             if "c" in parts:
                 parts.remove("c")
 
+            histogram = chunk_meta.get("histogram", {})
             entry: dict[str, Any] = {
                 "tile_name": tile_name,
                 "chunk": int(parts[0]),
@@ -172,19 +172,11 @@ def build_prepared_cubes_entries(
                 "x_start": chunk_meta["bbox"][2],
                 "channel": int(parts[5]) if len(parts) > 5 else 0,
                 "occupancy_ratio": chunk_meta.get("occ_ratio"),
+                "cdf_80": _extract_cdf(histogram, 80.0),
+                "cdf_90": _extract_cdf(histogram, 90.0),
+                "cdf_95": _extract_cdf(histogram, 95.0),
+                "cdf_99": _extract_cdf(histogram, 99.0),
             }
-
-            histogram = chunk_meta.get("histogram", {})
-            if histogram:
-                for pct, col in [
-                    (80.0, "cdf_80"),
-                    (90.0, "cdf_90"),
-                    (95.0, "cdf_95"),
-                    (99.0, "cdf_99"),
-                ]:
-                    val = _extract_cdf(histogram, pct)
-                    if val is not None:
-                        entry[col] = val
 
             cubes.append(entry)
 

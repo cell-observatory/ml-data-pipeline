@@ -145,6 +145,36 @@ def _load_roi_ids_from_file(path: str) -> list[str]:
     return ids
 
 
+def _load_prepared_ids_from_file(path: str) -> list[int]:
+    """Load prepared IDs from one-int-per-line text or CSV.
+
+    CSV files may use either a ``prepared_id`` or ``id`` column. Plain text
+    files may include comments starting with ``#``.
+    """
+    lines = Path(path).read_text().splitlines()
+    rows = [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+    if not rows:
+        raise ValueError(f"--prepared-ids-file {path} is empty")
+
+    first_cols = [c.strip().lower() for c in rows[0].split(",")]
+    if "prepared_id" in first_cols or "id" in first_cols:
+        idx = first_cols.index("prepared_id") if "prepared_id" in first_cols else first_cols.index("id")
+        ids: list[int] = []
+        for row in rows[1:]:
+            parts = row.split(",")
+            if len(parts) > idx and parts[idx].strip():
+                ids.append(int(parts[idx].strip()))
+        if not ids:
+            raise ValueError(f"--prepared-ids-file {path} has no prepared IDs")
+        return ids
+
+    ids = []
+    for row in rows:
+        first_field = row.split(",", 1)[0].strip()
+        ids.append(int(first_field))
+    return ids
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(
         description="DB-driven ML data pipeline",
@@ -222,7 +252,112 @@ def parse_args(argv=None) -> argparse.Namespace:
              "Required when --skip-processing is set.",
     )
 
+    refresh_group = ap.add_argument_group("Cache refresh")
+    refresh_group.add_argument(
+        "--refresh-statement-timeout",
+        type=str,
+        default="2h",
+        help="Postgres statement_timeout for each per-ROI cache refresh "
+             "(e.g. '20min', '2h', or '0' to disable). Default: 2h.",
+    )
+    refresh_group.add_argument(
+        "--refresh-fail-fast",
+        action="store_true",
+        help="Stop immediately if one prepared_id cache refresh fails. "
+             "Default behavior rolls back the failed prepared_id, continues, "
+             "and writes failed IDs to log_dir.",
+    )
+
     return ap.parse_args(argv)
+
+
+def parse_refresh_cache_args(argv=None) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description="Refresh prepared cache artifacts for existing prepared IDs",
+    )
+    ap.add_argument("--db", choices=["local", "staging", "prod"], default="prod")
+    ap.add_argument(
+        "--dotenv",
+        type=str,
+        default=None,
+        help="Path to .env file (defaults to repo-root .env if present)",
+    )
+    ap.add_argument(
+        "--prepared-ids",
+        type=lambda s: [int(x.strip()) for x in s.split(",") if x.strip()],
+        default=None,
+        help="Comma-separated prepared IDs, e.g. 23,24,25",
+    )
+    ap.add_argument(
+        "--prepared-ids-file",
+        type=str,
+        default=None,
+        help="File with one prepared_id per line, or CSV with prepared_id/id column.",
+    )
+    ap.add_argument(
+        "--log-dir",
+        type=str,
+        default="logs",
+        help="Directory for refresh failure logs.",
+    )
+    ap.add_argument(
+        "--refresh-statement-timeout",
+        type=str,
+        default="2h",
+        help="Postgres statement_timeout per prepared_id refresh. Use 0 to disable.",
+    )
+    ap.add_argument(
+        "--refresh-fail-fast",
+        action="store_true",
+        help="Stop on first refresh failure. Default is continue and log failed IDs.",
+    )
+    return ap.parse_args(argv)
+
+
+def refresh_cache_main(argv=None) -> int:
+    args = parse_refresh_cache_args(argv)
+
+    from pipeline.db_client import PipelineDBClient
+    from pipeline.store import create_store
+
+    prepared_ids: list[int] = []
+    if args.prepared_ids:
+        prepared_ids.extend(args.prepared_ids)
+    if args.prepared_ids_file:
+        prepared_ids.extend(_load_prepared_ids_from_file(args.prepared_ids_file))
+
+    prepared_ids = sorted(set(prepared_ids))
+    if not prepared_ids:
+        raise ValueError("Provide --prepared-ids or --prepared-ids-file")
+
+    Path(args.log_dir).mkdir(parents=True, exist_ok=True)
+    logger.info(
+        "Refreshing cache artifacts for %d prepared IDs: %s",
+        len(prepared_ids),
+        prepared_ids,
+    )
+
+    db_client = PipelineDBClient(mode=args.db, dotenv_path=args.dotenv)
+    store = create_store("db", db_client=db_client)
+    failed_ids = store.refresh_cache_artifacts(
+        prepared_ids,
+        statement_timeout=args.refresh_statement_timeout,
+        continue_on_error=not args.refresh_fail_fast,
+    )
+
+    if failed_ids:
+        failure_path = Path(args.log_dir) / "refresh_cache_failures.txt"
+        failure_path.write_text("\n".join(str(pid) for pid in failed_ids) + "\n")
+        logger.error(
+            "Cache refresh failed for %d prepared IDs: %s. Wrote %s",
+            len(failed_ids),
+            failed_ids,
+            failure_path,
+        )
+        return 2
+
+    logger.info("Cache refresh completed successfully for all %d prepared IDs", len(prepared_ids))
+    return 0
 
 
 def main(argv=None) -> int:
@@ -419,6 +554,8 @@ def main(argv=None) -> int:
         skip_processing=args.skip_processing,
         output_date_ymd=output_date_ymd,
         cluster=args.cluster,
+        refresh_statement_timeout=args.refresh_statement_timeout,
+        refresh_continue_on_error=not args.refresh_fail_fast,
     )
 
     logger.info("Pipeline complete. prepared_ids=%s", prepared_ids)
@@ -426,4 +563,6 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "refresh-cache":
+        sys.exit(refresh_cache_main(sys.argv[2:]))
     sys.exit(main())

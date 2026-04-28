@@ -47,12 +47,14 @@ def execute_plan(
     plan: ProcessingPlan,
     scan_results: list[ROIScanResult],
     store: PipelineStore,
-    log_dir: str = "",
+    log_dir: str,
     background_folder: str = "",
     add_support_ratio_metadata: bool = False,
     skip_processing: bool = False,
     output_date_ymd: list[str] | None = None,
     cluster: str | None = None,
+    refresh_statement_timeout: str = "2h",
+    refresh_continue_on_error: bool = True,
 ) -> list[int]:
     """Execute a ProcessingPlan: run Slurm jobs and ingest results.
 
@@ -180,6 +182,7 @@ def execute_plan(
             )
 
             prepared_id = store.ingest_prepared_roi(prepared, tiles, cubes)
+            store.mark_raw_roi_prepared(scan.roi_acquisition_id, prepared_id)
             prepared_ids.append(prepared_id)
             pbar.set_postfix(
                 prepared_id=prepared_id,
@@ -187,6 +190,27 @@ def execute_plan(
                 n_cubes=len(cubes),
             )
 
-        store.refresh_cache_artifacts(prepared_ids)
+        refresh_failures = store.refresh_cache_artifacts(
+            prepared_ids,
+            statement_timeout=refresh_statement_timeout,
+            continue_on_error=refresh_continue_on_error,
+        )
+        if refresh_failures:
+            failure_dir = log_dir
+            os.makedirs(failure_dir, exist_ok=True)
+            failure_path = os.path.join(
+                failure_dir,
+                f"refresh_failures_{plan.run_id}.txt",
+            )
+            with open(failure_path, "w") as f:
+                f.write("\n".join(str(pid) for pid in refresh_failures))
+                f.write("\n")
+            logger.error(
+                "Cache refresh failed for %d prepared IDs: %s. "
+                "Wrote retry list to %s",
+                len(refresh_failures),
+                refresh_failures,
+                failure_path,
+            )
 
     return prepared_ids

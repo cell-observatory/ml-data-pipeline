@@ -26,7 +26,7 @@ def add_synthetic_metadata_to_db(metadata_file, url, key, cluster=None):
     # Read all three
     df_prepared = pd.read_csv(metadata_file)
     df_prepared_tiles = pd.read_csv(tiles_path)
-    df_prepared_cubes = pd.read_csv(cubes_path)!
+    df_prepared_cubes = pd.read_csv(cubes_path)
 
     for prepared_row in df_prepared.itertuples(index=False):
 
