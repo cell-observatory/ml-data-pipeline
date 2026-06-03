@@ -19,7 +19,7 @@ DB-driven pipeline for discovering raw ROI datasets, validating TIFF layout, est
 Two execution paths on the real run:
 
 - **Full processing** (default): submits CSC unmixing / decon / DSR / training-image / Zarr-conversion jobs, then ingests their metadata into the DB.
-- **Metadata-only** (`--skip-processing`): skips every heavy job and instead reads existing `metadata.json` files under `<output-folder>/YYYY/M/D/...` to rebuild the DB rows. Intended for re-ingesting already-processed ROIs, e.g. after a schema change.
+- ***Metadata-only** (*`--skip-processing`*): skips every heavy job and instead reads existing* `metadata.json` *files under* `<output-folder>/YYYY/M/D/...` *to rebuild the DB rows. Intended for re-ingesting already-processed ROIs, e.g. after a schema change.*
 
 ## CLI flags
 
@@ -80,7 +80,7 @@ Environment variables used by the DB client:
 
 ### Local sandbox startup
 
-`--db local` assumes a local Postgres sandbox is already running with the full `acquistion_db` migrations applied (including `refresh_prepared_cache_artifacts(...)` and the `prepared_cube_*` aggregate tables).
+`--db local` assumes a local Postgres sandbox is already running with the full `acquistion_db` migrations applied (including `refresh_prepared_cache_artifacts(...)` and the `prepared_cube_`* aggregate tables).
 
 Two startup flows live in the platform repo:
 
@@ -191,3 +191,4 @@ python run_pipeline.py \
 - `csc_unmixing.py` — chromatic shift correction and unmixing.
 - `decon_dsr.py` — deconvolution, deskew, and rotate.
 - `preprocessing_profiles.json` — per-dataset preprocessing configs and `channel_aliases` used by `--channels` matching.
+
