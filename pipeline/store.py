@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 import json
 import logging
@@ -12,6 +13,114 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 logger = logging.getLogger(__name__)
+
+
+# ``pg_get_expr(relpartbound, ...)`` for RANGE partitions looks like
+# ``FOR VALUES FROM (363) TO (375)`` (half-open interval on the key).
+_PART_RANGE_BOUND_RE = re.compile(
+    r"FOR VALUES FROM\s*\(\s*'?(-?\d+)'?\s*\)\s*TO\s*\(\s*'?(-?\d+)'?\s*\)",
+    re.IGNORECASE,
+)
+
+
+def _relation_has_child_partitions(cur, regclass_fqn: str) -> bool:
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits "
+        "WHERE inhparent = %s::regclass)",
+        (regclass_fqn,),
+    )
+    return bool(cur.fetchone()[0])
+
+
+def _max_exclusive_upper_range_partition(
+    cur, regclass_fqn: str,
+) -> int | None:
+    """Largest ``TO (hi)`` among RANGE children; ``None`` if no parseable bound."""
+    cur.execute(
+        """
+        SELECT pg_get_expr(c.relpartbound, c.oid, true) AS bound
+          FROM pg_catalog.pg_inherits i
+          JOIN pg_catalog.pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = %s::regclass
+        """,
+        (regclass_fqn,),
+    )
+    max_hi: int | None = None
+    for (bound_expr,) in cur.fetchall():
+        if not bound_expr:
+            continue
+        m = _PART_RANGE_BOUND_RE.search(bound_expr)
+        if not m:
+            continue
+        hi = int(m.group(2))
+        max_hi = hi if max_hi is None else max(max_hi, hi)
+    return max_hi
+
+
+def _ensure_range_partition_covers_int_key(
+    cur,
+    *,
+    schema: str,
+    table: str,
+    key: int,
+    span: int = 64,
+) -> None:
+    """Attach a RANGE partition on ``schema.table`` so ``key`` maps to a leaf.
+
+    The production sandbox partitions ``prepared_cubes`` and
+    ``annotations_3d`` by ``prepared_id`` / ``roi_id``.  New synthetic
+    ROIs get SERIAL ids **past the last pre-made partition** (e.g. 385
+    when the tarball only had partitions through ``TO (375``), and
+    ``INSERT`` then errors with *no partition of relation found*.  Failed
+    transactions still burn sequence values, which is why a run can show
+    both that error **and** later failures on unrelated statements.
+
+    If ``schema.table`` has no child partitions, this is a no-op (table
+    not partitioned in this environment).
+    """
+    parent_fqn = f"{schema}.{table}"
+    if not _relation_has_child_partitions(cur, parent_fqn):
+        return
+
+    max_end = _max_exclusive_upper_range_partition(cur, parent_fqn)
+    if max_end is None:
+        raise RuntimeError(
+            f"{parent_fqn} has partitions but no RANGE (FROM..TO) bounds "
+            f"this helper can parse — create a partition manually for key={key}"
+        )
+
+    # Half-open ranges: ``FROM (lo) TO (hi)`` accepts ``lo <= id < hi``.
+    safety = 0
+    while key >= max_end:
+        safety += 1
+        if safety > 512:
+            raise RuntimeError(
+                f"partition extension loop exceeded limit for {parent_fqn} "
+                f"key={key}"
+            )
+        lo = max_end
+        hi = max(lo + span, key + 1 + 8)
+        hi_inclusive = hi - 1
+        part_name = f"{table}_p{lo:05d}_p{hi_inclusive:05d}"
+        ddl = sql.SQL(
+            "CREATE TABLE {} PARTITION OF {} FOR VALUES FROM ({}) TO ({})"
+        ).format(
+            sql.Identifier(schema, part_name),
+            sql.Identifier(schema, table),
+            sql.Literal(lo),
+            sql.Literal(hi),
+        )
+        cur.execute(ddl)
+        logger.info(
+            "[LocalPostgresStore] created missing partition %s on %s "
+            "FOR VALUES FROM %s TO %s (key=%s needed coverage)",
+            part_name,
+            parent_fqn,
+            lo,
+            hi,
+            key,
+        )
+        max_end = hi
 
 
 # Hot tables to ANALYZE before per-ROI cache refresh.
@@ -140,6 +249,9 @@ def _copy_prepared_cubes_via_pg(
     n = 0
     try:
         with conn.cursor() as cur:
+            _ensure_range_partition_covers_int_key(
+                cur, schema="public", table="prepared_cubes", key=prepared_id,
+            )
             with cur.copy(copy_stmt) as cp:
                 for cube in cubes:
                     cp.write_row([
@@ -175,8 +287,14 @@ class PipelineStore(ABC):
         prepared: dict,
         tiles: list[dict],
         cubes: list[dict],
+        annotations: list[dict] | None = None,
     ) -> int:
-        """Insert prepared + tiles + cubes. Returns prepared_id.
+        """Insert prepared + tiles + cubes (and optional annotations) atomically.
+
+        Returns the DB-assigned prepared_id. ``annotations`` rows have
+        their ``roi_id`` overwritten with that id, and any
+        ``prepared_id`` field is dropped, so callers can pass the
+        CSV-local id and let the store remap.
 
         Does NOT refresh aggregate caches. Callers should invoke
         ``refresh_cache_artifacts`` once after ingesting all ROIs.
@@ -249,6 +367,7 @@ class JsonFileStore(PipelineStore):
         prepared: dict,
         tiles: list[dict],
         cubes: list[dict],
+        annotations: list[dict] | None = None,
     ) -> int:
         roi_id = prepared.get("raw_roi_acquisition_id", "unknown")
         payload = {
@@ -256,6 +375,8 @@ class JsonFileStore(PipelineStore):
             "tiles": tiles,
             "cubes_count": len(cubes),
             "cubes_sample": cubes[:5],
+            "annotations_count": len(annotations or []),
+            "annotations_sample": (annotations or [])[:5],
         }
         path = self._prepared_dir / f"prepared_{roi_id}.json"
         path.write_text(json.dumps(payload, indent=2, default=str))
@@ -283,11 +404,13 @@ class LocalPostgresStore(PipelineStore):
     """Writes directly to a local Postgres sandbox via SQL."""
 
     CUBE_INSERT_BATCH = 10_000
+    ANNOTATION_INSERT_BATCH = 10_000
     _JSON_COLUMNS = {
         "roi_tile_scan_log": {"error_messages", "scan_metadata"},
         "prepared": {"channel_mapping"},
         "prepared_tiles": set(),
         "prepared_cubes": set(),
+        "annotations_3d": set(),
     }
 
     def __init__(self, db_client) -> None:
@@ -391,16 +514,96 @@ class LocalPostgresStore(PipelineStore):
         finally:
             conn.close()
 
+    def _prepare_annotation_rows(
+        self,
+        prepared_id: int,
+        annotations: list[dict],
+        tile_names: set[str] | None = None,
+    ) -> list[dict]:
+        """Stamp roi_id, drop CSV-local join keys, and validate tile_id.
+
+        ``tile_names``, when provided, is the authoritative set of
+        tile_name values for ``prepared_id`` (typically built from the
+        prepared_tiles dicts being inserted in the same transaction).
+        Any annotation whose ``tile_id`` is not in this set is an
+        orphan -- the platform's tile-annotation agg joins on
+        ``a.tile_id = ptv.tile_name`` so orphans would silently never
+        roll up. We refuse to insert them.
+        """
+        out: list[dict] = []
+        bad_tiles: set = set()
+        for ann in annotations:
+            row = dict(ann)
+            row.pop("prepared_id", None)
+            row.pop("id", None)  # GENERATED ALWAYS identity — server assigns
+            row["roi_id"] = prepared_id
+            if tile_names is not None:
+                tid = row.get("tile_id")
+                if tid not in tile_names:
+                    bad_tiles.add(tid)
+            out.append(row)
+
+        if bad_tiles:
+            sample = sorted(bad_tiles, key=lambda x: ("" if x is None else str(x)))[:5]
+            raise ValueError(
+                f"prepared_id={prepared_id}: {len(bad_tiles)} annotation "
+                f"tile_id values are not among the {len(tile_names or ())} "
+                f"prepared_tiles being inserted (e.g. {sample}). "
+                f"Refusing to insert orphaned annotations -- they would "
+                f"never join in aggregate_prepared_tile_annotation_agg_1."
+            )
+        return out
+
+    def _insert_annotations_with_cur(
+        self,
+        cur,
+        prepared_id: int,
+        prepared_rows: list[dict],
+    ) -> None:
+        """Batched INSERT using an existing cursor (no commit/rollback)."""
+        for i in range(0, len(prepared_rows), self.ANNOTATION_INSERT_BATCH):
+            batch = prepared_rows[i : i + self.ANNOTATION_INSERT_BATCH]
+            self._insert_many(cur, "annotations_3d", batch)
+
+        # Inside the same transaction, confirm the rows actually landed
+        # under this roi_id with is_consensus=true (the platform agg
+        # filter). Mismatch is almost always a sign the caller mixed
+        # roi_ids in `prepared_rows` -- abort the whole tx instead of
+        # leaving a half-ingested ROI.
+        cur.execute(
+            "SELECT count(*) FROM public.annotations_3d "
+            "WHERE roi_id = %s AND is_consensus = true",
+            (prepared_id,),
+        )
+        result = cur.fetchone()
+        observed = int(result[0]) if result else 0
+        expected = sum(1 for r in prepared_rows if r.get("is_consensus"))
+        if observed != expected:
+            raise RuntimeError(
+                f"prepared_id={prepared_id}: post-INSERT verification "
+                f"failed: shipped {expected} consensus annotation rows "
+                f"but DB reports {observed} for roi_id={prepared_id}. "
+                f"Aborting transaction."
+            )
+
     def ingest_prepared_roi(
         self,
         prepared: dict,
         tiles: list[dict],
         cubes: list[dict],
+        annotations: list[dict] | None = None,
     ) -> int:
+        annotations = annotations or []
+
         conn = self._connect()
         try:
             with conn.cursor() as cur:
                 prepared_id = self._insert_row(cur, "prepared", prepared, returning="id")
+
+                _ensure_range_partition_covers_int_key(
+                    cur, schema="public", table="prepared_cubes", key=prepared_id,
+                )
+
                 for tile in tiles:
                     tile["prepared_id"] = prepared_id
                 self._insert_many(cur, "prepared_tiles", tiles)
@@ -410,14 +613,73 @@ class LocalPostgresStore(PipelineStore):
                 for i in range(0, len(cubes), self.CUBE_INSERT_BATCH):
                     batch = cubes[i : i + self.CUBE_INSERT_BATCH]
                     self._insert_many(cur, "prepared_cubes", batch)
+
+                n_anno = 0
+                if annotations:
+                    _ensure_range_partition_covers_int_key(
+                        cur, schema="public", table="annotations_3d", key=prepared_id,
+                    )
+                    tile_names = {t.get("tile_name") for t in tiles}
+                    prepared_anno = self._prepare_annotation_rows(
+                        prepared_id, annotations, tile_names=tile_names,
+                    )
+                    self._insert_annotations_with_cur(cur, prepared_id, prepared_anno)
+                    n_anno = len(prepared_anno)
+
             conn.commit()
             logger.debug(
-                "[LocalPostgresStore] ingested prepared_id=%d (%d tiles, %d cubes)",
+                "[LocalPostgresStore] ingested prepared_id=%d "
+                "(%d tiles, %d cubes, %d annotations)",
                 prepared_id,
                 len(tiles),
                 len(cubes),
+                n_anno,
             )
             return prepared_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def ingest_annotations_3d(
+        self,
+        prepared_id: int,
+        annotations: list[dict],
+    ) -> int:
+        """Insert annotation rows into public.annotations_3d (standalone).
+
+        Prefer passing ``annotations`` to ``ingest_prepared_roi`` so the
+        whole ROI lands in one transaction. This entry point is for the
+        case where you're back-filling annotations onto an already-
+        ingested prepared row; it cannot validate ``tile_id`` against
+        prepared_tiles for you, so the caller must guarantee that
+        ``tile_id`` matches an existing ``prepared_tiles.tile_name`` row
+        for ``prepared_id``.
+
+        Each row's ``roi_id`` is overwritten with the supplied
+        ``prepared_id``, and any ``prepared_id`` field is dropped.
+        Returns the number of rows inserted.
+        """
+        if not annotations:
+            return 0
+        prepared_rows = self._prepare_annotation_rows(
+            prepared_id, annotations, tile_names=None,
+        )
+        conn = self._connect()
+        try:
+            with conn.cursor() as cur:
+                _ensure_range_partition_covers_int_key(
+                    cur, schema="public", table="annotations_3d", key=prepared_id,
+                )
+                self._insert_annotations_with_cur(cur, prepared_id, prepared_rows)
+            conn.commit()
+            logger.debug(
+                "[LocalPostgresStore] inserted %d annotations for prepared_id=%d",
+                len(prepared_rows),
+                prepared_id,
+            )
+            return len(prepared_rows)
         except Exception:
             conn.rollback()
             raise
@@ -518,7 +780,18 @@ class SupabaseStore(PipelineStore):
         prepared: dict,
         tiles: list[dict],
         cubes: list[dict],
+        annotations: list[dict] | None = None,
     ) -> int:
+        # SupabaseStore can't ingest annotations through the REST API right now,
+        # so refuse loudly rather than silently dropping rows. Real (non-synth)
+        # data sets never pass this kwarg.
+        if annotations:
+            raise NotImplementedError(
+                f"SupabaseStore.ingest_prepared_roi does not support inserting "
+                f"annotations (received {len(annotations)} rows). Use the "
+                f"local sandbox path (LocalPostgresStore) for synthetic data, "
+                f"or extend SupabaseStore to POST into annotations_3d via REST."
+            )
         # Cubes are the bulk of write traffic (~O(100k) rows per ROI). When a
         # direct-Postgres write URI is configured (SUPABASE_<MODE>_PG_WRITE_URI)
         # we COPY them straight to the database, skipping PostgREST and the
